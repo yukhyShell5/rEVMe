@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* App base styles */
+html, body, #root {
+  height: 100%;
+  overflow: hidden; /* no page scrollbar */
+}
+body { margin: 0; }
+
+/* Professional minimal dark theme variables */
+:root {
+  --bg: #0b0f14;            /* app background */
+  --surface: #0f141b;       /* panel/content */
+  --panel: #111826;         /* headers */
+  --border: #1f2a37;        /* thin separators */
+  --border-strong: #2b394a; /* active borders */
+  --muted: #9ca3af;         /* secondary text */
+  --text: #e5e7eb;          /* primary text */
+  --accent: #60a5fa;        /* blue-400 */
+  --accent-strong: #3b82f6; /* blue-500 */
+}
+
+:root[data-theme="light"] {
+  --bg: #f6f7fb;
+  --surface: #ffffff;
+  --panel: #f3f4f6;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --muted: #6b7280;
+  --text: #111827;
+  --accent: #3b82f6;
+  --accent-strong: #2563eb;
+}
+
+/* Base */
+@layer base {
+  body {
+    background-color: var(--bg);
+    color: var(--text);
+    font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  code, pre {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  }
+}
+
+/* GoldenLayout theming overrides: minimal and clean like IDA Pro */
+/* Root container */
+#gl-container { background: var(--bg); overflow: hidden; }
+.lm_goldenlayout { background: var(--bg); }
+
+/* Prevent internal GL scrollbars (DISABLED to keep drag/drop working) */
+/* .lm_root, .lm_row, .lm_stack, .lm_items, .lm_content { overflow: hidden !important; } */
+
+/* Stacks/Content */
+.lm_stack, .lm_content { background: var(--surface); }
+
+/* Header (tab bar) */
+.lm_header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  height: 28px;
+}
+
+/* Tabs */
+.lm_tab {
+  color: var(--muted);
+  background: transparent;
+  border: none !important;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-right: 6px;
+  font-size: 12.5px;
+  line-height: 1;
+}
+.lm_tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+.lm_tab.lm_active {
+  color: var(--text);
+  background: rgba(255,255,255,0.06);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+/* Close / controls */
+.lm_header .lm_controls > * { opacity: 0.8; }
+.lm_header .lm_controls > *:hover { opacity: 1; }
+/* Hide only the close (cross) icon; keep layout interactions intact */
+.lm_header .lm_controls .lm_close { display: none !important; }
+
+/* Splitters */
+.lm_splitter { background: var(--border) !important; opacity: 0.7; }
+.lm_splitter:hover { background: var(--accent-strong) !important; opacity: 1; }
+
+/* Thin borders around content panes for definition */
+.lm_items .lm_content { box-shadow: inset 0 0 0 1px var(--border); }
+
+/* Hide scrollbars across the app */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
+
+/* Utilities */
+@layer utilities {
+  .surface { background-color: var(--surface); }
+  .panel { background-color: var(--panel); }
+  .card { background-color: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+  .muted { color: var(--muted); }
+  .theme-toggle-btn { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; line-height: 1; }
+}
