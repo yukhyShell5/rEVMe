@@ -406,12 +406,6 @@ async fn open_bin_file(app: tauri::AppHandle) -> Result<Option<BytecodeData>, St
     }
 }
 
-#[tauri::command]
-fn read_bin_file_path(file_path: String) -> Result<BytecodeData, String> {
-    let path = Path::new(&file_path);
-    read_bin_file(path)
-}
-
 fn read_bin_file(file_path: &Path) -> Result<BytecodeData, String> {
     let filename = file_path
         .file_name()

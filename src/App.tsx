@@ -7,10 +7,44 @@ import { GoldenLayout, LayoutConfig } from "golden-layout";
 import BytecodePanel from "./components/BytecodePanel";
 import OpcodesPanel from "./components/OpcodesPanel";
 import GraphPanel from "./components/GraphPanel";
+import MenuBar from "./components/MenuBar";
+import StatusBar from "./components/StatusBar";
+import DebugPanel from "./components/DebugPanel";
+import { useLayoutManager } from "./hooks/useLayoutManager";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { appStore } from "./store/AppStore";
 
 function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const glRef = useRef<GoldenLayout | null>(null);
+  const layoutManager = useLayoutManager();
+
+  const handleOpenFile = () => {
+    appStore.loadBytecodeFile();
+  };
+
+  const handleExit = async () => {
+    const appWindow = getCurrentWindow();
+    await appWindow.close();
+  };
+
+  const handleMinimizeShortcut = async () => {
+    const appWindow = getCurrentWindow();
+    await appWindow.minimize();
+  };
+
+  const handleToggleDebug = () => {
+    appStore.toggleDebugPanel();
+  };
+
+  useKeyboardShortcuts({
+    onOpenFile: handleOpenFile,
+    onExit: handleExit,
+    onFullscreen: layoutManager.enterFullscreen,
+    onMinimize: handleMinimizeShortcut,
+    onToggleDebug: handleToggleDebug,
+  });
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -24,7 +58,10 @@ function App() {
       mountEl.style.height = "100%";
       container.element.append(mountEl);
       const root = ReactDOM.createRoot(mountEl);
+      
+      // Simply render the component - it should inherit context from the parent app
       root.render(React.createElement(Component));
+      
       container.on("destroy", () => {
         try {
           root.unmount();
@@ -79,6 +116,7 @@ function App() {
     onResize();
 
     glRef.current = gl;
+    layoutManager.setLayout(gl);
 
     return () => {
       window.removeEventListener("resize", onResize);
@@ -87,7 +125,16 @@ function App() {
     };
   }, []);
 
-  return <div id="gl-container" ref={containerRef} className="w-screen h-screen bg-gray-900" />;
+  return (
+    <div className="w-screen h-screen bg-gray-900 flex flex-col">
+      <MenuBar 
+        layoutManager={layoutManager}
+      />
+      <div id="gl-container" ref={containerRef} className="flex-1" />
+      <StatusBar status="Ready" />
+      <DebugPanel />
+    </div>
+  );
 }
 
 export default App;

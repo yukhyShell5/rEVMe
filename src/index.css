@@ -1,7 +1,7 @@
+@import 'reactflow/dist/style.css';
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-@import 'reactflow/dist/style.css';
 
 /* App base styles */
 html, body, #root {

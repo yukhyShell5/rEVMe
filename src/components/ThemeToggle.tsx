@@ -23,11 +23,16 @@ const ThemeToggle: React.FC = () => {
 
   return (
     <button
-      className="theme-toggle-btn hover:opacity-100 opacity-90"
+      className="flex items-center px-3 py-1.5 rounded-md bg-gradient-to-r from-gray-600/30 to-gray-700/30 hover:from-gray-500/40 hover:to-gray-600/40 transition-all duration-200 text-gray-200 hover:text-white text-xs font-medium shadow-sm border border-gray-600/30 hover:border-gray-500/50 group"
       onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
       title={theme === "dark" ? "Passer en thème clair" : "Passer en thème sombre"}
     >
-      {theme === "dark" ? "Light" : "Dark"}
+      <span className="mr-2 transition-transform group-hover:scale-110">
+        {theme === "dark" ? "🌙" : "☀️"}
+      </span>
+      <span className="transition-all group-hover:tracking-wide">
+        {theme === "dark" ? "Dark" : "Light"}
+      </span>
     </button>
   );
 };

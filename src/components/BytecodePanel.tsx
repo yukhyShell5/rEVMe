@@ -1,32 +1,34 @@
-import React, { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import React from "react";
+import { useAppStore } from "../hooks/useAppStore";
 
-interface BytecodeData {
-  filename: string;
-  bytecode: string;
-  size: number;
-}
+const BytecodePanel: React.FC = () => {
+  const { state, loadBytecodeFile } = useAppStore();
+  const { bytecodeData, loading, error } = state;
 
-export const BytecodePanel: React.FC = () => {
-  const [bytecodeData, setBytecodeData] = useState<BytecodeData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Debug logging
+  React.useEffect(() => {
+    console.log("📄 BytecodePanel - MOUNTED with store");
+    console.log("📄 BytecodePanel - Initial state:", { bytecodeData, loading, error });
+  }, []);
 
-  const handleOpenFile = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      
-      const result = await invoke<BytecodeData | null>("open_bin_file");
-      
-      if (result) {
-        setBytecodeData(result);
-      }
-    } catch (err) {
-      setError(err as string);
-      console.error("Failed to open file:", err);
-    } finally {
-      setLoading(false);
+  React.useEffect(() => {
+    console.log("📄 BytecodePanel - bytecodeData changed:", bytecodeData);
+  }, [bytecodeData]);
+
+  React.useEffect(() => {
+    console.log("⏳ BytecodePanel - loading changed:", loading);
+  }, [loading]);
+
+  React.useEffect(() => {
+    console.log("❌ BytecodePanel - error changed:", error);
+  }, [error]);
+
+  const handleLoadFromHex = () => {
+    const hex = prompt("Enter bytecode as hex (0x prefix optional):");
+    if (hex?.trim()) {
+      const cleanHex = hex.startsWith('0x') ? hex : '0x' + hex;
+      // For now, just log - we'll implement hex loading later
+      console.log("Loading hex:", cleanHex);
     }
   };
 
@@ -34,13 +36,22 @@ export const BytecodePanel: React.FC = () => {
     <div className="w-full h-full p-4 text-sm flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold uppercase tracking-wide muted">Bytecode</h2>
-        <button
-          onClick={handleOpenFile}
-          disabled={loading}
-          className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:opacity-50 text-white rounded-md transition-colors"
-        >
-          {loading ? "Loading..." : "Open .bin File"}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={loadBytecodeFile}
+            disabled={loading}
+            className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:opacity-50 text-white rounded-md transition-colors"
+          >
+            {loading ? "Loading..." : "Open .bin File"}
+          </button>
+          <button
+            onClick={handleLoadFromHex}
+            disabled={loading}
+            className="px-3 py-1 text-xs bg-green-600 hover:bg-green-700 disabled:bg-green-800 disabled:opacity-50 text-white rounded-md transition-colors"
+          >
+            Load Hex
+          </button>
+        </div>
       </div>
       
       {error && (

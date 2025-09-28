@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useAppStore } from "../hooks/useAppStore";
 
 interface OpcodeInstruction {
   pc: number;
@@ -15,40 +15,32 @@ interface SortConfig {
   direction: 'asc' | 'desc';
 }
 
-export const OpcodesPanel: React.FC = () => {
-  const [instructions, setInstructions] = useState<OpcodeInstruction[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+const OpcodesPanel: React.FC = () => {
+  const { state } = useAppStore();
+  const { opcodeInstructions, bytecodeData, loading, error } = state;
+  
+  // Debug logging
+  React.useEffect(() => {
+    console.log("🔧 OpcodesPanel - MOUNTED with store");
+    console.log("🔧 OpcodesPanel - Initial state:", { opcodeInstructions: opcodeInstructions?.length || 0, bytecodeData, loading, error });
+  }, []);
+
+  React.useEffect(() => {
+    console.log("🔧 OpcodesPanel - opcodeInstructions changed:", opcodeInstructions?.length || 0, "instructions");
+  }, [opcodeInstructions]);
+
+  React.useEffect(() => {
+    console.log("📄 OpcodesPanel - bytecodeData changed:", bytecodeData?.filename);
+  }, [bytecodeData]);
+  
+  const [selectedOpcode, setSelectedOpcode] = useState<OpcodeInstruction | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [sortConfig, setSortConfig] = useState<SortConfig>({ key: null, direction: 'asc' });
-  const [highlightedRow, setHighlightedRow] = useState<number | null>(null);
-  const [bytecode, setBytecode] = useState("");
 
-  const handleLoadBytecode = async () => {
-    if (!bytecode.trim()) {
-      setError("Please enter bytecode");
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError(null);
-      
-      const result = await invoke<OpcodeInstruction[]>("disassemble_bytecode", { 
-        bytecodeHex: bytecode.trim() 
-      });
-      
-      setInstructions(result);
-    } catch (err) {
-      setError(err as string);
-      console.error("Failed to disassemble bytecode:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const filteredAndSortedInstructions = useMemo(() => {
-    let filtered = instructions.filter(instruction => 
+  const filteredAndSortedOpcodes = useMemo(() => {
+    if (!opcodeInstructions) return [];
+    
+    let filtered = opcodeInstructions.filter(instruction =>
       instruction.opcode.toLowerCase().includes(searchTerm.toLowerCase()) ||
       instruction.pc.toString().includes(searchTerm) ||
       instruction.args.some(arg => arg.toLowerCase().includes(searchTerm.toLowerCase()))
@@ -59,162 +51,185 @@ export const OpcodesPanel: React.FC = () => {
         const aValue = a[sortConfig.key!];
         const bValue = b[sortConfig.key!];
         
-        if (Array.isArray(aValue) || Array.isArray(bValue)) {
-          const aStr = Array.isArray(aValue) ? aValue.join(',') : String(aValue);
-          const bStr = Array.isArray(bValue) ? bValue.join(',') : String(bValue);
-          return sortConfig.direction === 'asc' 
-            ? aStr.localeCompare(bStr)
-            : bStr.localeCompare(aStr);
+        if (aValue < bValue) {
+          return sortConfig.direction === 'asc' ? -1 : 1;
         }
-        
-        if (typeof aValue === 'number' && typeof bValue === 'number') {
-          return sortConfig.direction === 'asc' ? aValue - bValue : bValue - aValue;
+        if (aValue > bValue) {
+          return sortConfig.direction === 'asc' ? 1 : -1;
         }
-        
-        const aStr = String(aValue);
-        const bStr = String(bValue);
-        return sortConfig.direction === 'asc' 
-          ? aStr.localeCompare(bStr)
-          : bStr.localeCompare(aStr);
+        return 0;
       });
     }
 
     return filtered;
-  }, [instructions, searchTerm, sortConfig]);
+  }, [opcodeInstructions, searchTerm, sortConfig]);
 
   const handleSort = (key: keyof OpcodeInstruction) => {
-    setSortConfig(prevConfig => ({
-      key,
-      direction: prevConfig.key === key && prevConfig.direction === 'asc' ? 'desc' : 'asc'
-    }));
+    let direction: 'asc' | 'desc' = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
   };
 
-  const getSortIcon = (key: keyof OpcodeInstruction) => {
-    if (sortConfig.key !== key) return '↕';
-    return sortConfig.direction === 'asc' ? '↑' : '↓';
-  };
-
-  const formatArray = (arr: string[]) => {
-    if (arr.length === 0) return '-';
-    if (arr.length <= 3) return arr.join(', ');
-    return `${arr.slice(0, 3).join(', ')}... (+${arr.length - 3})`;
+  const getSortIcon = (columnKey: keyof OpcodeInstruction) => {
+    if (sortConfig.key === columnKey) {
+      return sortConfig.direction === 'asc' ? '↑' : '↓';
+    }
+    return '';
   };
 
   return (
     <div className="w-full h-full p-4 text-sm flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold uppercase tracking-wide muted">Opcodes</h2>
-      </div>
-      
-      <div className="mb-3 space-y-2">
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
           <input
             type="text"
-            value={bytecode}
-            onChange={(e) => setBytecode(e.target.value)}
-            placeholder="Enter EVM bytecode (hex)..."
-            className="flex-1 px-3 py-2 text-xs bg-gray-800 border border-gray-700 rounded text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
+            placeholder="Search opcodes..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="px-2 py-1 text-xs bg-gray-800 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
           />
-          <button
-            onClick={handleLoadBytecode}
-            disabled={loading}
-            className="px-4 py-2 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:opacity-50 text-white rounded transition-colors"
-          >
-            {loading ? "Loading..." : "Disassemble"}
-          </button>
+          <span className="text-xs text-muted">
+            {filteredAndSortedOpcodes.length} instructions
+          </span>
         </div>
-        
-        <input
-          type="text"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          placeholder="Search opcodes..."
-          className="w-full px-3 py-2 text-xs bg-gray-800 border border-gray-700 rounded text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
-        />
       </div>
-      
+
+      {loading && (
+        <div className="flex items-center justify-center p-4 text-muted">
+          Loading opcodes...
+        </div>
+      )}
+
       {error && (
         <div className="mb-3 p-2 bg-red-900/50 border border-red-700/50 rounded text-red-200 text-xs">
           Error: {error}
         </div>
       )}
-      
-      <div className="card flex-1 overflow-hidden">
-        {instructions.length > 0 ? (
-          <div className="h-full overflow-auto">
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-gray-800 border-b border-gray-700">
-                <tr>
-                  <th 
-                    className="p-2 text-left cursor-pointer hover:bg-gray-700 select-none"
-                    onClick={() => handleSort('pc')}
-                  >
-                    PC {getSortIcon('pc')}
-                  </th>
-                  <th 
-                    className="p-2 text-left cursor-pointer hover:bg-gray-700 select-none"
-                    onClick={() => handleSort('opcode')}
-                  >
-                    Opcode {getSortIcon('opcode')}
-                  </th>
-                  <th className="p-2 text-left">Args</th>
-                  <th 
-                    className="p-2 text-left cursor-pointer hover:bg-gray-700 select-none"
-                    onClick={() => handleSort('gas')}
-                  >
-                    Gas {getSortIcon('gas')}
-                  </th>
-                  <th className="p-2 text-left">Stack Before</th>
-                  <th className="p-2 text-left">Stack After</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredAndSortedInstructions.map((instruction, index) => (
-                  <tr 
-                    key={index}
-                    className={`border-b border-gray-700 hover:bg-gray-800/50 cursor-pointer ${
-                      highlightedRow === index ? 'bg-blue-900/30' : ''
-                    }`}
-                    onClick={() => setHighlightedRow(highlightedRow === index ? null : index)}
-                  >
-                    <td className="p-2 font-mono">0x{instruction.pc.toString(16).padStart(4, '0')}</td>
-                    <td className="p-2 font-bold text-blue-300">{instruction.opcode}</td>
-                    <td className="p-2 font-mono text-green-300">
-                      {instruction.args.length > 0 ? instruction.args.join(', ') : '-'}
-                    </td>
-                    <td className="p-2 text-yellow-300">{instruction.gas}</td>
-                    <td className="p-2 text-gray-400 font-mono text-xs">
-                      {formatArray(instruction.stack_before)}
-                    </td>
-                    <td className="p-2 text-gray-400 font-mono text-xs">
-                      {formatArray(instruction.stack_after)}
-                    </td>
+
+      {bytecodeData && (
+        <div className="mb-2 text-xs text-muted">
+          Disassembly for: <strong>{bytecodeData.filename}</strong>
+        </div>
+      )}
+
+      <div className="flex-1 flex gap-3">
+        <div className="flex-1 card p-0 overflow-hidden">
+          {filteredAndSortedOpcodes.length > 0 ? (
+            <div className="h-full overflow-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-800 sticky top-0">
+                  <tr className="text-left">
+                    <th 
+                      className="p-2 cursor-pointer hover:bg-gray-700 select-none"
+                      onClick={() => handleSort('pc')}
+                    >
+                      PC {getSortIcon('pc')}
+                    </th>
+                    <th 
+                      className="p-2 cursor-pointer hover:bg-gray-700 select-none"
+                      onClick={() => handleSort('opcode')}
+                    >
+                      Opcode {getSortIcon('opcode')}
+                    </th>
+                    <th className="p-2">Args</th>
+                    <th 
+                      className="p-2 cursor-pointer hover:bg-gray-700 select-none"
+                      onClick={() => handleSort('gas')}
+                    >
+                      Gas {getSortIcon('gas')}
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="h-full flex items-center justify-center text-gray-500">
-            <div className="text-center">
-              <div className="mb-2">📋</div>
-              <div>Enter bytecode and click "Disassemble" to view opcodes</div>
-              <div className="text-xs mt-1">Example: 0x6060604052341561000f57...</div>
+                </thead>
+                <tbody>
+                  {filteredAndSortedOpcodes.map((instruction, index) => (
+                    <tr 
+                      key={`${instruction.pc}-${index}`}
+                      className={`hover:bg-gray-800 cursor-pointer border-b border-gray-800 ${
+                        selectedOpcode?.pc === instruction.pc ? 'bg-blue-900/30' : ''
+                      }`}
+                      onClick={() => setSelectedOpcode(instruction)}
+                    >
+                      <td className="p-2 font-mono">0x{instruction.pc.toString(16).padStart(4, '0')}</td>
+                      <td className="p-2 font-mono font-bold text-blue-300">{instruction.opcode}</td>
+                      <td className="p-2 font-mono text-green-300">
+                        {instruction.args.length > 0 ? instruction.args.join(', ') : '-'}
+                      </td>
+                      <td className="p-2 font-mono text-yellow-300">{instruction.gas}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="h-full flex items-center justify-center text-muted">
+              {opcodeInstructions.length === 0 
+                ? "No bytecode loaded. Open a .bin file or use the menu to load bytecode."
+                : "No opcodes match your search criteria."
+              }
+            </div>
+          )}
+        </div>
+
+        {selectedOpcode && (
+          <div className="w-80 card p-3 flex-shrink-0">
+            <h3 className="text-sm font-semibold mb-3 text-blue-300">
+              {selectedOpcode.opcode} Details
+            </h3>
+            
+            <div className="space-y-3 text-xs">
+              <div>
+                <span className="text-muted">Program Counter:</span>
+                <div className="font-mono mt-1">0x{selectedOpcode.pc.toString(16).padStart(4, '0')} ({selectedOpcode.pc})</div>
+              </div>
+              
+              <div>
+                <span className="text-muted">Gas Cost:</span>
+                <div className="font-mono mt-1 text-yellow-300">{selectedOpcode.gas}</div>
+              </div>
+              
+              {selectedOpcode.args.length > 0 && (
+                <div>
+                  <span className="text-muted">Arguments:</span>
+                  <div className="font-mono mt-1 text-green-300">
+                    {selectedOpcode.args.map((arg, i) => (
+                      <div key={i}>{arg}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
+              <div>
+                <span className="text-muted">Stack Before:</span>
+                <div className="font-mono mt-1 max-h-24 overflow-auto">
+                  {selectedOpcode.stack_before.length > 0 ? (
+                    selectedOpcode.stack_before.map((item, i) => (
+                      <div key={i} className="text-purple-300">[{i}] {item}</div>
+                    ))
+                  ) : (
+                    <div className="text-gray-500">Empty</div>
+                  )}
+                </div>
+              </div>
+              
+              <div>
+                <span className="text-muted">Stack After:</span>
+                <div className="font-mono mt-1 max-h-24 overflow-auto">
+                  {selectedOpcode.stack_after.length > 0 ? (
+                    selectedOpcode.stack_after.map((item, i) => (
+                      <div key={i} className="text-purple-300">[{i}] {item}</div>
+                    ))
+                  ) : (
+                    <div className="text-gray-500">Empty</div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         )}
       </div>
-      
-      {instructions.length > 0 && (
-        <div className="mt-2 text-xs text-gray-500">
-          Showing {filteredAndSortedInstructions.length} of {instructions.length} instructions
-          {highlightedRow !== null && (
-            <span className="ml-4 text-blue-400">
-              Selected: instruction at PC 0x{instructions[highlightedRow]?.pc.toString(16).padStart(4, '0')}
-            </span>
-          )}
-        </div>
-      )}
     </div>
   );
 };
