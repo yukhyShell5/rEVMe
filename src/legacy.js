@@ -1,0 +1,2081 @@
+// @ts-nocheck
+
+// Legacy vanilla file attached to React
+
+// ===========================
+// EVM OPCODE TABLE
+// ===========================
+const OPCODES = {
+  0x00:'STOP', 0x01:'ADD', 0x02:'MUL', 0x03:'SUB', 0x04:'DIV',
+  0x05:'SDIV', 0x06:'MOD', 0x07:'SMOD', 0x08:'ADDMOD', 0x09:'MULMOD',
+  0x0a:'EXP', 0x0b:'SIGNEXTEND',
+  0x10:'LT', 0x11:'GT', 0x12:'SLT', 0x13:'SGT', 0x14:'EQ',
+  0x15:'ISZERO', 0x16:'AND', 0x17:'OR', 0x18:'XOR', 0x19:'NOT',
+  0x1a:'BYTE', 0x1b:'SHL', 0x1c:'SHR', 0x1d:'SAR',
+  0x20:'KECCAK256',
+  0x30:'ADDRESS', 0x31:'BALANCE', 0x32:'ORIGIN', 0x33:'CALLER',
+  0x34:'CALLVALUE', 0x35:'CALLDATALOAD', 0x36:'CALLDATASIZE',
+  0x37:'CALLDATACOPY', 0x38:'CODESIZE', 0x39:'CODECOPY',
+  0x3a:'GASPRICE', 0x3b:'EXTCODESIZE', 0x3c:'EXTCODECOPY',
+  0x3d:'RETURNDATASIZE', 0x3e:'RETURNDATACOPY', 0x3f:'EXTCODEHASH',
+  0x40:'BLOCKHASH', 0x41:'COINBASE', 0x42:'TIMESTAMP', 0x43:'NUMBER',
+  0x44:'DIFFICULTY', 0x45:'GASLIMIT', 0x46:'CHAINID', 0x47:'SELFBALANCE',
+  0x48:'BASEFEE',
+  0x50:'POP', 0x51:'MLOAD', 0x52:'MSTORE', 0x53:'MSTORE8',
+  0x54:'SLOAD', 0x55:'SSTORE', 0x56:'JUMP', 0x57:'JUMPI',
+  0x58:'PC', 0x59:'MSIZE', 0x5a:'GAS', 0x5b:'JUMPDEST',
+  0x5f:'PUSH0',
+  0xf0:'CREATE', 0xf1:'CALL', 0xf2:'CALLCODE', 0xf3:'RETURN',
+  0xf4:'DELEGATECALL', 0xf5:'CREATE2', 0xfa:'STATICCALL',
+  0xfd:'REVERT', 0xfe:'INVALID', 0xff:'SELFDESTRUCT',
+  0xa0:'LOG0', 0xa1:'LOG1', 0xa2:'LOG2', 0xa3:'LOG3', 0xa4:'LOG4',
+};
+for(let i=1;i<=32;i++) OPCODES[0x5f+i]=`PUSH${i}`;
+for(let i=1;i<=16;i++) OPCODES[0x7f+i]=`DUP${i}`;
+for(let i=1;i<=16;i++) OPCODES[0x8f+i]=`SWAP${i}`;
+ 
+function getOpcodeClass(op) {
+  if (!op) return 'op-other';
+  if (op.startsWith('PUSH')) return 'op-push';
+  if (op==='JUMP'||op==='JUMPI'||op==='JUMPDEST') return 'op-jump';
+  if (['CALL','STATICCALL','DELEGATECALL','CALLCODE'].includes(op)) return 'op-call';
+  if (op==='RETURN'||op==='STOP') return 'op-return';
+  if (op==='REVERT'||op==='INVALID'||op==='SELFDESTRUCT') return 'op-revert';
+  if (['ADD','MUL','SUB','DIV','MOD','EXP','ADDMOD','MULMOD','SDIV','SMOD','LT','GT','SLT','SGT','EQ','ISZERO','AND','OR','XOR','NOT','SHL','SHR','SAR'].includes(op)) return 'op-math';
+  if (['MLOAD','MSTORE','MSTORE8','SLOAD','SSTORE','CALLDATALOAD','CALLDATACOPY','CODECOPY','RETURNDATACOPY'].includes(op)) return 'op-memory';
+  if (op.startsWith('DUP')) return 'op-dup';
+  if (op.startsWith('SWAP')) return 'op-swap';
+  if (op.startsWith('LOG')) return 'op-log';
+  return 'op-other';
+}
+ 
+// ===========================
+// DISASSEMBLER
+// ===========================
+function disassemble(hexStr) {
+  const clean = hexStr.replace(/^0x/i,'').replace(/\s/g,'');
+  if (!clean || clean.length % 2 !== 0) return [];
+ 
+  const bytes = [];
+  for(let i=0;i<clean.length;i+=2) bytes.push(parseInt(clean.slice(i,i+2),16));
+ 
+  const instructions = [];
+  let i = 0;
+  while(i < bytes.length) {
+    const offset = i;
+    const byte = bytes[i];
+    const opcode = OPCODES[byte] || 'UNKNOWN';
+    let size = 1;
+    let operand = null;
+    let operandHex = null;
+ 
+    if(byte >= 0x60 && byte <= 0x7f) { // PUSH1-PUSH32
+      size = byte - 0x60 + 2;
+      const end = Math.min(i + size, bytes.length);
+      const opBytes = bytes.slice(i+1, end);
+      operandHex = opBytes.map(b => b.toString(16).padStart(2,'0')).join('');
+      operand = '0x' + operandHex;
+    }
+ 
+    const rawBytes = bytes.slice(offset, offset+size).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+ 
+    instructions.push({ offset, byte, opcode, size, operand, rawBytes });
+    i += size;
+  }
+  return instructions;
+}
+ 
+// ===========================
+// FUNCTION DETECTION
+// ===========================
+const KNOWN_SELECTORS = {
+  '70a08231': 'balanceOf(address)',
+  'a9059cbb': 'transfer(address,uint256)',
+  '23b872dd': 'transferFrom(address,address,uint256)',
+  '095ea7b3': 'approve(address,uint256)',
+  'dd62ed3e': 'allowance(address,address)',
+  '18160ddd': 'totalSupply()',
+  '06fdde03': 'name()',
+  '95d89b41': 'symbol()',
+  '313ce567': 'decimals()',
+  'f2fde38b': 'transferOwnership(address)',
+  '8da5cb5b': 'owner()',
+  'e6585b06': 'renounceOwnership()',
+  '40c10f19': 'mint(address,uint256)',
+  '42966c68': 'burn(uint256)',
+  '5c975abb': 'paused()',
+  '8456cb59': 'pause()',
+  '3f4ba83a': 'unpause()',
+  'a22cb465': 'setApprovalForAll(address,bool)',
+  'e985e9c5': 'isApprovedForAll(address,address)',
+  '6352211e': 'ownerOf(uint256)',
+  'c87b56dd': 'tokenURI(uint256)',
+  'b88d4fde': 'safeTransferFrom(address,address,uint256,bytes)',
+  '42842e0e': 'safeTransferFrom(address,address,uint256)',
+  'a0712d68': 'mint(uint256)',
+  'e8a3d485': 'contractURI()',
+  'd0e30db0': 'deposit()',
+  '2e1a7d4d': 'withdraw(uint256)',
+  '3ccfd60b': 'withdraw()',
+  '1249c58b': 'mint()',
+  '6a627842': 'mint(address)',
+  '4e71d92d': 'claim()',
+  '8b4cee08': 'requestWithdrawal(uint256)',
+  'b6b55f25': 'deposit(uint256)',
+  '69328dec': 'withdraw(address,uint256,address)',
+};
+ 
+function detectFunctions(instructions) {
+  const functions = [];
+  const jumpDests = new Set();
+  let i = 0;
+ 
+  // Find all JUMPDEST
+  instructions.forEach(ins => { if(ins.opcode==='JUMPDEST') jumpDests.add(ins.offset); });
+ 
+  // Pattern: PUSH4 <selector> EQ PUSH2 <dest> JUMPI
+  for(let i=0;i<instructions.length-4;i++) {
+    const ins = instructions[i];
+    if(ins.opcode==='PUSH4' && ins.operand) {
+      const selector = ins.operand.slice(2).toLowerCase();
+      const next = instructions[i+1];
+      if(next && next.opcode==='EQ') {
+        const name = KNOWN_SELECTORS[selector] || `func_${selector}`;
+        const isView = name.includes('()') && !['pause','unpause'].some(s=>name.startsWith(s));
+        const isPayable = ['deposit','mint','buy'].some(s => name.toLowerCase().startsWith(s));
+        const isVuln = checkSelectorVuln(selector, name);
+        functions.push({ selector: '0x'+selector, name, sig: name, isView, isPayable, isVuln, offset: ins.offset });
+      }
+    }
+  }
+ 
+  // Add constructor and fallback
+  if(functions.length > 0) {
+    functions.unshift({ selector: '—', name: 'constructor', sig: 'constructor()', isView: false, isPayable: false, isVuln: false, offset: 0 });
+    functions.push({ selector: '—', name: 'fallback', sig: 'fallback()', isView: false, isPayable: false, isVuln: false, offset: -1 });
+  }
+ 
+  return functions;
+}
+ 
+function checkSelectorVuln(selector, name) {
+  const dangerFuncs = ['selfdestruct','kill','transferOwnership','mint','burn','withdraw','setImplementation'];
+  return dangerFuncs.some(d => name.toLowerCase().includes(d.toLowerCase()));
+}
+ 
+// ===========================
+// VULNERABILITY SCANNER
+// ===========================
+function scanVulnerabilities(instructions) {
+  const vulns = [];
+  const ops = instructions.map(i=>i.opcode);
+  const hasSelfdestruct = ops.includes('SELFDESTRUCT');
+  const hasDelegatecall = ops.includes('DELEGATECALL');
+  const hasTxOrigin = ops.includes('ORIGIN');
+  const hasTimestamp = ops.includes('TIMESTAMP');
+  const hasCreate2 = ops.includes('CREATE2');
+  const callCount = ops.filter(o=>o==='CALL').length;
+  const sloadCount = ops.filter(o=>o==='SLOAD').length;
+  const sstoreCount = ops.filter(o=>o==='SSTORE').length;
+ 
+  // Check for reentrancy pattern: CALL before SSTORE
+  let callIdx = ops.indexOf('CALL');
+  let sstoreIdx = ops.indexOf('SSTORE');
+  if(callIdx !== -1 && sstoreIdx !== -1 && callIdx < sstoreIdx) {
+    vulns.push({
+      severity: 'high', name: 'Potential Reentrancy',
+      loc: `offset 0x${instructions[callIdx]?.offset?.toString(16)||'?'}`,
+      desc: 'CALL opcode found before SSTORE. State change after external call may allow reentrancy.'
+    });
+  }
+ 
+  if(hasSelfdestruct) vulns.push({
+    severity: 'high', name: 'SELFDESTRUCT Present',
+    loc: `offset 0x${instructions[ops.indexOf('SELFDESTRUCT')]?.offset?.toString(16)||'?'}`,
+    desc: 'Contract can be destroyed. Verify access controls.'
+  });
+ 
+  if(hasDelegatecall) vulns.push({
+    severity: 'med', name: 'DELEGATECALL Usage',
+    loc: `offset 0x${instructions[ops.indexOf('DELEGATECALL')]?.offset?.toString(16)||'?'}`,
+    desc: 'Delegatecall can allow storage manipulation if target is untrusted.'
+  });
+ 
+  if(hasTxOrigin) vulns.push({
+    severity: 'med', name: 'tx.origin Authorization',
+    loc: `offset 0x${instructions[ops.indexOf('ORIGIN')]?.offset?.toString(16)||'?'}`,
+    desc: 'Using ORIGIN for auth is vulnerable to phishing attacks. Use CALLER instead.'
+  });
+ 
+  if(hasTimestamp) vulns.push({
+    severity: 'low', name: 'Timestamp Dependency',
+    loc: `offset 0x${instructions[ops.indexOf('TIMESTAMP')]?.offset?.toString(16)||'?'}`,
+    desc: 'TIMESTAMP can be manipulated by miners within a ~15s window.'
+  });
+ 
+  if(hasCreate2) vulns.push({
+    severity: 'info', name: 'CREATE2 Detected',
+    loc: `offset 0x${instructions[ops.indexOf('CREATE2')]?.offset?.toString(16)||'?'}`,
+    desc: 'Deterministic deployment — verify no metamorphic contract pattern.'
+  });
+ 
+  if(callCount > 3) vulns.push({
+    severity: 'info', name: 'Multiple External Calls',
+    loc: `${callCount} occurrences`,
+    desc: 'High external call count increases attack surface. Review all call sites.'
+  });
+ 
+  return vulns;
+}
+ 
+// ===========================
+// ERC DETECTION
+// ===========================
+function detectERC(functions) {
+  const sels = new Set(functions.map(f=>f.selector.slice(2)));
+  const erc20Sels = ['70a08231','a9059cbb','23b872dd','095ea7b3','dd62ed3e','18160ddd'];
+  const erc721Sels = ['6352211e','c87b56dd','70a08231','a22cb465','e985e9c5'];
+  const erc1155Sels = ['00fdd58e','4e1273f4','a22cb465','2eb2c2d6'];
+  const isERC20 = erc20Sels.filter(s=>sels.has(s)).length >= 4;
+  const isERC721 = erc721Sels.filter(s=>sels.has(s)).length >= 3;
+  const isERC1155 = erc1155Sels.filter(s=>sels.has(s)).length >= 3;
+  const standards = [];
+  if(isERC20) standards.push('ERC-20');
+  if(isERC721) standards.push('ERC-721');
+  if(isERC1155) standards.push('ERC-1155');
+  if(sels.has('8da5cb5b')||sels.has('f2fde38b')) standards.push('Ownable');
+  if(sels.has('5c975abb')) standards.push('Pausable');
+  return standards.length ? standards.join(', ') : '—';
+}
+ 
+// ===========================
+// DECOMPILER (pseudo) — v2.0
+// ===========================
+function decompile(instructions, functions) {
+  let out = '';
+  const kw = (s) => `<span class="dc-keyword">${s}</span>`;
+  const ty = (s) => `<span class="dc-type">${s}</span>`;
+  const fn = (s) => `<span class="dc-func">${s}</span>`;
+  const cm = (s) => `<span class="dc-comment">${s}</span>`;
+  const num = (s) => `<span class="dc-number">${s}</span>`;
+  const mod = (s) => `<span class="dc-modifier">${s}</span>`;
+  const str = (s) => `<span class="dc-string">${s}</span>`;
+ 
+  out += cm('// rEVMe Pseudo-Decompiler v2.0 — enhanced reconstruction\n');
+  out += cm('// WARNING: This is best-effort. Verify against source if available.\n\n');
+ 
+  // Detect compiler version from metadata
+  const compilerVer = detectCompiler(currentInstructions.map(i=>i.rawBytes).join(''));
+  out += `${kw('pragma')} solidity ^0.8.0; ${cm('// ' + compilerVer)}\n\n`;
+ 
+  const hasOwnable = functions.some(f=>f.name==='owner()'||f.name==='transferOwnership(address)');
+  const hasPausable = functions.some(f=>f.name==='paused()');
+  const isERC20 = functions.some(f=>f.name==='transfer(address,uint256)');
+  const isERC721 = functions.some(f=>f.name.startsWith('ownerOf'));
+ 
+  if(hasOwnable) out += `${kw('import')} ${str('"@openzeppelin/contracts/access/Ownable.sol"')};\n`;
+  if(hasPausable) out += `${kw('import')} ${str('"@openzeppelin/contracts/security/Pausable.sol"')};\n`;
+  if(isERC20) out += `${kw('import')} ${str('"@openzeppelin/contracts/token/ERC20/ERC20.sol"')};\n`;
+  if(isERC721) out += `${kw('import')} ${str('"@openzeppelin/contracts/token/ERC721/ERC721.sol"')};\n`;
+  out += '\n';
+ 
+  const bases = [];
+  if(isERC20) bases.push(ty('ERC20'));
+  if(isERC721) bases.push(ty('ERC721'));
+  if(hasOwnable) bases.push(ty('Ownable'));
+  if(hasPausable) bases.push(ty('Pausable'));
+ 
+  out += `${kw('contract')} ${fn('Contract')}`;
+  if(bases.length) out += ` ${kw('is')} ${bases.join(', ')}`;
+  out += ` {\n\n`;
+ 
+  // Detect events from LOG opcodes
+  const events = detectEvents(instructions);
+  if(events.length) {
+    out += `  ${cm('// Detected events')}\n`;
+    for(const ev of events) {
+      out += `  ${kw('event')} ${fn(ev.name)}(${ev.params || ty('...')});\n`;
+    }
+    out += '\n';
+  }
+ 
+  // Dynamic storage from analysis
+  const storageSlots = buildStorageLayout(instructions);
+  out += `  ${cm('// Storage layout (' + storageSlots.length + ' slot(s) detected)')}\n`;
+  for(const s of storageSlots) {
+    out += `  ${ty(s.type)} ${kw(s.visibility || 'private')} ${s.name}; ${cm('// slot ' + s.slot)}\n`;
+  }
+  out += '\n';
+ 
+  // Detect require/revert patterns for each function
+  const requirePatterns = detectRequirePatterns(instructions);
+ 
+  // Functions
+  const filteredFns = functions.filter(f => f.selector !== '—');
+  for(const func of filteredFns) {
+    const parts = func.name.match(/^([^(]+)\(([^)]*)\)$/);
+    const fname = parts ? parts[1] : func.name;
+    const rawArgs = parts && parts[2] ? parts[2] : '';
+    const args = rawArgs ? rawArgs.split(',').map((t,i) => {
+      const trimmed = t.trim();
+      const paramName = guessParamName(trimmed, fname, i);
+      return `${ty(trimmed)} ${paramName}`;
+    }).join(', ') : '';
+ 
+    // Detect modifiers
+    const visibility = kw('external');
+    const isView = func.isView || ['balanceOf','totalSupply','name','symbol','decimals','owner','paused','allowance','ownerOf','tokenURI','contractURI','isApprovedForAll'].some(v=>fname.includes(v));
+    const viewMod = isView ? ` ${kw('view')}` : '';
+    const payMod = func.isPayable ? ` ${mod('payable')}` : '';
+    const hasGuard = func.isVuln || ['mint','burn','pause','unpause','transferOwnership','renounceOwnership','setApprovalForAll'].some(g=>fname.includes(g));
+    const guardMod = hasGuard ? ` ${mod('onlyOwner')}` : '';
+ 
+    // Detect return type
+    const returnType = guessReturnType(fname, rawArgs, isView);
+ 
+    out += `  ${cm(`// selector: ${func.selector}`)}\n`;
+    out += `  ${kw('function')} ${fn(fname)}(${args}) ${visibility}${viewMod}${payMod}${guardMod}`;
+ 
+    if(returnType) {
+      out += ` ${kw('returns')} (${ty(returnType)}) {\n`;
+    } else {
+      out += ` {\n`;
+    }
+ 
+    // Body: add require patterns
+    if(requirePatterns.length && !isView) {
+      if(hasGuard) out += `    ${fn('require')}(msg.sender == _owner, ${str('"Not owner"')});\n`;
+      if(func.isPayable) out += `    ${fn('require')}(msg.value > ${num('0')}, ${str('"No ETH sent"')});\n`;
+    }
+ 
+    // Body content
+    if(isView && fname === 'balanceOf') {
+      out += `    ${kw('return')} _balances[${rawArgs ? guessParamName('address',fname,0) : 'account'}];\n`;
+    } else if(isView && fname === 'allowance') {
+      out += `    ${kw('return')} _allowances[owner_][spender_];\n`;
+    } else if(isView && fname === 'totalSupply') {
+      out += `    ${kw('return')} _totalSupply;\n`;
+    } else if(isView && fname === 'owner') {
+      out += `    ${kw('return')} _owner;\n`;
+    } else if(isView && fname === 'paused') {
+      out += `    ${kw('return')} _paused;\n`;
+    } else if(isView && (fname==='name'||fname==='symbol'||fname==='tokenURI'||fname==='contractURI')) {
+      out += `    ${kw('return')} _${fname.replace('URI','uri')};\n`;
+    } else if(isView && fname === 'decimals') {
+      out += `    ${kw('return')} ${num('18')};\n`;
+    } else if(fname === 'transfer') {
+      out += `    _balances[msg.sender] -= amount_;\n`;
+      out += `    _balances[to_] += amount_;\n`;
+      out += `    ${kw('emit')} ${fn('Transfer')}(msg.sender, to_, amount_);\n`;
+    } else if(fname === 'approve') {
+      out += `    _allowances[msg.sender][spender_] = amount_;\n`;
+      out += `    ${kw('emit')} ${fn('Approval')}(msg.sender, spender_, amount_);\n`;
+    } else if(fname === 'transferFrom') {
+      out += `    _allowances[from_][msg.sender] -= amount_;\n`;
+      out += `    _balances[from_] -= amount_;\n`;
+      out += `    _balances[to_] += amount_;\n`;
+      out += `    ${kw('emit')} ${fn('Transfer')}(from_, to_, amount_);\n`;
+    } else if(!isView) {
+      out += `    ${cm('// ... decompiled body')}\n`;
+    }
+ 
+    out += `  }\n\n`;
+  }
+ 
+  out += `}\n`;
+  return out;
+}
+ 
+function guessParamName(type, funcName, idx) {
+  const t = type.toLowerCase();
+  if(t === 'address' && idx === 0 && ['transfer','transferFrom','mint','safeTransferFrom'].some(f=>funcName.includes(f))) return funcName.includes('From') && idx === 0 ? 'from_' : 'to_';
+  if(t === 'address' && idx === 1 && funcName.includes('From')) return 'to_';
+  if(t === 'address' && funcName === 'approve') return 'spender_';
+  if(t === 'address' && funcName === 'allowance') return idx === 0 ? 'owner_' : 'spender_';
+  if(t === 'address' && funcName === 'balanceOf') return 'account_';
+  if(t === 'uint256' && ['transfer','transferFrom','approve','mint','burn'].some(f=>funcName.includes(f))) return 'amount_';
+  if(t === 'uint256' && funcName.includes('tokenURI')) return 'tokenId_';
+  if(t === 'bool') return 'status_';
+  if(t === 'bytes') return 'data_';
+  return `param${idx}`;
+}
+ 
+function guessReturnType(fname, args, isView) {
+  if(!isView) {
+    if(['transfer','transferFrom','approve'].includes(fname)) return 'bool';
+    return null;
+  }
+  if(['balanceOf','totalSupply','allowance'].includes(fname)) return 'uint256';
+  if(fname === 'decimals') return 'uint8';
+  if(['name','symbol','tokenURI','contractURI'].includes(fname)) return 'string memory';
+  if(fname === 'owner') return 'address';
+  if(fname === 'paused') return 'bool';
+  if(fname === 'ownerOf') return 'address';
+  if(fname === 'isApprovedForAll') return 'bool';
+  return 'uint256';
+}
+ 
+function detectEvents(instructions) {
+  const events = [];
+  const KNOWN_TOPICS = {
+    'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef': { name: 'Transfer', params: 'address indexed from, address indexed to, uint256 value' },
+    '8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925': { name: 'Approval', params: 'address indexed owner, address indexed spender, uint256 value' },
+    '17307eab39ab6107e8899845ad3d59bd9653f200f220920489ca2b5937696c31': { name: 'ApprovalForAll', params: 'address indexed owner, address indexed operator, bool approved' },
+  };
+  for(let i = 0; i < instructions.length; i++) {
+    const ins = instructions[i];
+    if(ins.opcode && ins.opcode.startsWith('LOG') && ins.opcode !== 'LOG0') {
+      // Check previous PUSH32 for topic hash
+      for(let j = Math.max(0, i-6); j < i; j++) {
+        if(instructions[j].opcode === 'PUSH32' && instructions[j].operand) {
+          const topic = instructions[j].operand.slice(2).toLowerCase();
+          if(KNOWN_TOPICS[topic] && !events.find(e=>e.name===KNOWN_TOPICS[topic].name)) {
+            events.push(KNOWN_TOPICS[topic]);
+          }
+        }
+      }
+    }
+  }
+  if(!events.length && instructions.some(i=>i.opcode && i.opcode.startsWith('LOG'))) {
+    events.push({ name: 'UnknownEvent', params: '...' });
+  }
+  return events;
+}
+ 
+function detectRequirePatterns(instructions) {
+  const patterns = [];
+  for(let i = 0; i < instructions.length - 3; i++) {
+    // Pattern: ISZERO + PUSH + JUMPI → require(condition)
+    if(instructions[i].opcode === 'ISZERO' && instructions[i+1]?.opcode?.startsWith('PUSH') && instructions[i+2]?.opcode === 'JUMPI') {
+      patterns.push({ offset: instructions[i].offset, type: 'require' });
+    }
+    // Pattern: CALLVALUE + ISZERO → require(msg.value == 0) i.e. non-payable check
+    if(instructions[i].opcode === 'CALLVALUE' && instructions[i+1]?.opcode === 'DUP1' && instructions[i+2]?.opcode === 'ISZERO') {
+      patterns.push({ offset: instructions[i].offset, type: 'nonpayable-check' });
+    }
+  }
+  return patterns;
+}
+ 
+// ===========================
+// STORAGE LAYOUT (dynamic)
+// ===========================
+function buildStorageLayout(instructions) {
+  const slots = new Map();
+  const hasKeccak = instructions.some(i => i.opcode === 'KECCAK256');
+ 
+  for(let i = 0; i < instructions.length; i++) {
+    const ins = instructions[i];
+    if(ins.opcode === 'SLOAD' || ins.opcode === 'SSTORE') {
+      // Look backwards for the slot number (usually a PUSH before SLOAD/SSTORE)
+      for(let j = i - 1; j >= Math.max(0, i - 5); j--) {
+        if(instructions[j].opcode?.startsWith('PUSH') && instructions[j].operand) {
+          const slotHex = instructions[j].operand;
+          const slotNum = parseInt(slotHex, 16);
+          if(slotNum <= 20) { // Reasonable direct slot
+            const key = slotHex;
+            if(!slots.has(key)) {
+              slots.set(key, {
+                slot: slotHex,
+                reads: 0, writes: 0,
+                type: 'uint256',
+                name: `_slot${slotNum}`,
+                visibility: 'private'
+              });
+            }
+            if(ins.opcode === 'SLOAD') slots.get(key).reads++;
+            else slots.get(key).writes++;
+          }
+          break;
+        }
+        if(instructions[j].opcode === 'KECCAK256') {
+          // This is a mapping access — the slot was hashed
+          break;
+        }
+      }
+    }
+  }
+ 
+  // Infer types based on usage patterns
+  const result = Array.from(slots.values()).sort((a,b) => parseInt(a.slot,16) - parseInt(b.slot,16));
+ 
+  // Try to assign meaningful names based on position and ERC patterns
+  const nameMap = {
+    0: hasKeccak ? 'mapping(address=>uint256)' : 'uint256',
+    1: 'mapping(address=>mapping(address=>uint256))',
+    2: 'uint256',
+    3: 'address',
+    4: 'bool',
+    5: 'string',
+    6: 'string',
+  };
+  const labelMap = {
+    0: hasKeccak ? '_balances' : '_value0',
+    1: '_allowances',
+    2: '_totalSupply',
+    3: '_owner',
+    4: '_paused',
+    5: '_name',
+    6: '_symbol',
+  };
+ 
+  for(const slot of result) {
+    const n = parseInt(slot.slot, 16);
+    if(nameMap[n]) slot.type = nameMap[n];
+    if(labelMap[n]) slot.name = labelMap[n];
+    // Detect address type from AND with 0xffffffffffffffffffffffffffffffffffffffff mask
+    if(slot.reads + slot.writes === 1 && n >= 3) {
+      slot.type = slot.type || 'uint256';
+    }
+  }
+ 
+  // If no slots found, add a note
+  if(result.length === 0) {
+    result.push({ slot: '—', type: '—', name: 'No direct storage access detected (may use proxied storage)', visibility: '' });
+  }
+ 
+  return result;
+}
+ 
+// ===========================
+// STRING EXTRACTION
+// ===========================
+function extractStrings(instructions) {
+  const strings = [];
+  for(const ins of instructions) {
+    if(!ins.operand) continue;
+    const hex = ins.operand.slice(2);
+    if(hex.length >= 4) {
+      let str = '';
+      for(let i=0;i<hex.length;i+=2) {
+        const c = parseInt(hex.slice(i,i+2),16);
+        if(c>=32&&c<127) str+=String.fromCharCode(c);
+        else { str=''; break; }
+      }
+      if(str.length >= 3) strings.push({ offset: ins.offset, value: str, hex: ins.operand });
+    }
+  }
+  return strings;
+}
+ 
+// ===========================
+// RENDER DISASSEMBLY
+// ===========================
+function renderDisassembly(instructions, selectedOffset) {
+  const container = document.getElementById('view-disasm');
+  const empty = document.getElementById('disasm-empty');
+  if(empty) empty.style.display = 'none';
+ 
+  // Clear
+  [...container.querySelectorAll('.disasm-row')].forEach(r=>r.remove());
+ 
+  let prevWasJump = false;
+  instructions.forEach((ins, idx) => {
+    const row = document.createElement('div');
+    row.className = 'disasm-row';
+    if(ins.opcode==='JUMPDEST') { row.classList.add('block-start'); row.classList.add('jump-target'); }
+    if(ins.offset === selectedOffset) row.classList.add('selected');
+ 
+    const offsetHex = ins.offset.toString(16).padStart(4,'0');
+    const bytes = ins.rawBytes.length > 20 ? ins.rawBytes.slice(0,17)+'...' : ins.rawBytes;
+    const opcClass = getOpcodeClass(ins.opcode);
+ 
+    let operandHtml = '';
+    if(ins.operand) {
+      // Detect selector
+      if(ins.opcode==='PUSH4' && KNOWN_SELECTORS[ins.operand.slice(2).toLowerCase()]) {
+        const fname = KNOWN_SELECTORS[ins.operand.slice(2).toLowerCase()];
+        operandHtml = `<span class="operand-func">${ins.operand}</span> <span class="dc-comment">; ${fname}</span>`;
+      } else if(ins.opcode==='PUSH2'||ins.opcode==='PUSH3') {
+        operandHtml = `<span class="operand-hex">${ins.operand}</span>`;
+      } else if(ins.operand.length > 12) {
+        operandHtml = `<span class="operand-addr">${ins.operand}</span>`;
+      } else {
+        operandHtml = `<span class="operand-hex">${ins.operand}</span>`;
+      }
+    }
+ 
+    let comment = '';
+    if(ins.opcode==='CALLER') comment = '<span class="d-comment">; msg.sender</span>';
+    if(ins.opcode==='CALLVALUE') comment = '<span class="d-comment">; msg.value</span>';
+    if(ins.opcode==='ORIGIN') comment = '<span class="d-comment">; tx.origin ⚠</span>';
+    if(ins.opcode==='TIMESTAMP') comment = '<span class="d-comment">; block.timestamp</span>';
+    if(ins.opcode==='SELFDESTRUCT') comment = '<span class="d-comment" style="color:var(--danger)">; ⚠ destroys contract</span>';
+    if(ins.opcode==='DELEGATECALL') comment = '<span class="d-comment" style="color:var(--warning)">; ⚠ proxy call</span>';
+    if(ins.opcode==='SSTORE') comment = '<span class="d-comment">; storage write</span>';
+    if(ins.opcode==='SLOAD') comment = '<span class="d-comment">; storage read</span>';
+    if(ins.opcode==='KECCAK256') comment = '<span class="d-comment">; keccak256 hash</span>';
+ 
+    row.innerHTML = `
+      <span class="d-offset">${offsetHex}</span>
+      <span class="d-bytes">${bytes.padEnd(20,' ')}</span>
+      <span class="d-opcode ${opcClass}">${ins.opcode.padEnd(14,' ')}</span>
+      <span class="d-operand">${operandHtml} ${comment}</span>
+    `;
+ 
+    row.addEventListener('click', () => {
+      document.querySelectorAll('.disasm-row').forEach(r=>r.classList.remove('selected'));
+      row.classList.add('selected');
+      document.getElementById('status-offset').textContent = '0x'+offsetHex;
+      document.getElementById('status-opcode').textContent = ins.opcode;
+      // Sync with hex view
+      const byteLen = ins.rawBytes ? ins.rawBytes.length / 2 : 1;
+      highlightHexBytes(ins.offset, byteLen);
+    });
+ 
+    container.appendChild(row);
+  });
+}
+ 
+// ===========================
+// RENDER HEX VIEW (improved)
+// ===========================
+let hexAllBytes = [];
+
+function renderHex(hexStr) {
+  const clean = hexStr.replace(/^0x/i,'').replace(/\s/g,'');
+  hexAllBytes = [];
+  for(let i=0;i<clean.length;i+=2) hexAllBytes.push(clean.slice(i,i+2));
+ 
+  const container = document.getElementById('hex-view');
+  if(!container) return;
+  const maxRows = Math.ceil(hexAllBytes.length / 16);
+  let html = '';
+  for(let row=0; row < maxRows; row++) {
+    const rowBytes = hexAllBytes.slice(row*16, (row+1)*16);
+    const offset = (row*16).toString(16).padStart(4,'0');
+    const hexCells = rowBytes.map((b, i) => {
+      const globalIdx = row * 16 + i;
+      return `<span class="hex-byte" data-idx="${globalIdx}">${b}</span>`;
+    }).join(' ');
+    const ascii = rowBytes.map((b, i) => {
+      const c = parseInt(b,16);
+      const globalIdx = row * 16 + i;
+      return (c>=32&&c<127)
+        ? `<span class="hex-ascii" data-idx="${globalIdx}">${String.fromCharCode(c)}</span>`
+        : `<span class="hex-ascii-np" data-idx="${globalIdx}">.</span>`;
+    }).join('');
+    html += `<div class="hex-row" data-row="${row}" onclick="hexRowClick(${row*16})">`;
+    html += `<span style="color:var(--text3);min-width:35px">${offset}</span>`;
+    html += `<span>${hexCells}</span>`;
+    html += `<span>${ascii}</span>`;
+    html += `</div>`;
+  }
+  container.innerHTML = html;
+}
+
+function highlightHexBytes(startByte, length) {
+  document.querySelectorAll('.hex-byte.hex-hl').forEach(el => el.classList.remove('hex-hl'));
+  document.querySelectorAll('.hex-row.hex-selected').forEach(el => el.classList.remove('hex-selected'));
+  for(let i = startByte; i < startByte + length && i < hexAllBytes.length; i++) {
+    const el = document.querySelector(`.hex-byte[data-idx="${i}"]`);
+    if(el) el.classList.add('hex-hl');
+  }
+  const startRow = Math.floor(startByte / 16);
+  const rowEl = document.querySelector(`.hex-row[data-row="${startRow}"]`);
+  if(rowEl) {
+    rowEl.classList.add('hex-selected');
+    rowEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+function hexRowClick(byteOffset) {
+  // Find the instruction at this byte offset and highlight in disasm
+  const targetHex = byteOffset.toString(16).padStart(4,'0');
+  const rows = document.querySelectorAll('.disasm-row');
+  for(const row of rows) {
+    const off = row.querySelector('.d-offset')?.textContent?.trim();
+    if(off === targetHex) {
+      switchView('disasm');
+      document.querySelectorAll('.disasm-row').forEach(r => r.classList.remove('selected'));
+      row.classList.add('selected');
+      row.classList.add('flash');
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      document.getElementById('status-offset').textContent = '0x' + targetHex;
+      break;
+    }
+  }
+}
+ 
+// ===========================
+// OPCODE DISTRIBUTION
+// ===========================
+function renderOpcodeDistribution(instructions) {
+  const counts = {};
+  for(const ins of instructions) {
+    const cat = getCategory(ins.opcode);
+    counts[cat] = (counts[cat]||0) + 1;
+  }
+  const total = instructions.length || 1;
+  const colors = { 'PUSH': '#60a5fa', 'MATH': '#a78bfa', 'MEMORY': '#fbbf24', 'FLOW': '#f472b6', 'CALL': '#f97316', 'STACK': '#6b7280', 'OTHER': '#374151' };
+ 
+  let html = '';
+  for(const [cat, count] of Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,6)) {
+    const pct = Math.round(count/total*100);
+    const color = colors[cat] || '#374151';
+    html += `<div style="margin-bottom:6px;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text2);margin-bottom:2px;">
+        <span>${cat}</span><span style="color:${color}">${pct}%</span>
+      </div>
+      <div style="height:3px;background:var(--border2);border-radius:2px;">
+        <div style="height:3px;background:${color};width:${pct}%;border-radius:2px;"></div>
+      </div>
+    </div>`;
+  }
+  document.getElementById('opcode-dist').innerHTML = html;
+}
+ 
+function getCategory(op) {
+  if(op.startsWith('PUSH')) return 'PUSH';
+  if(['ADD','MUL','SUB','DIV','MOD','EXP','AND','OR','XOR','SHL','SHR','LT','GT','EQ','ISZERO','NOT'].includes(op)) return 'MATH';
+  if(['MLOAD','MSTORE','SLOAD','SSTORE','CALLDATALOAD','RETURNDATASIZE'].includes(op)) return 'MEMORY';
+  if(['JUMP','JUMPI','JUMPDEST','STOP','RETURN','REVERT'].includes(op)) return 'FLOW';
+  if(['CALL','STATICCALL','DELEGATECALL','CALLCODE','CREATE','CREATE2'].includes(op)) return 'CALL';
+  if(op.startsWith('DUP')||op.startsWith('SWAP')||op==='POP') return 'STACK';
+  return 'OTHER';
+}
+ 
+// ===========================
+// STATE
+// ===========================
+let currentInstructions = [];
+let currentFunctions = [];
+let currentView = 'disasm';
+let currentAddress = null;
+ 
+const NETWORKS = {
+  Mainnet:  { chainId: '0x1',   rpc: 'https://eth.llamarpc.com',                etherscan: 'https://api.etherscan.io/api'          },
+  Arbitrum: { chainId: '0xa4b1',rpc: 'https://arb1.arbitrum.io/rpc',             etherscan: 'https://api.arbiscan.io/api'            },
+  Optimism: { chainId: '0xa',   rpc: 'https://mainnet.optimism.io',              etherscan: 'https://api-optimistic.etherscan.io/api'},
+  Polygon:  { chainId: '0x89',  rpc: 'https://polygon-rpc.com',                  etherscan: 'https://api.polygonscan.com/api'        },
+  Base:     { chainId: '0x2105',rpc: 'https://mainnet.base.org',                 etherscan: 'https://api.basescan.org/api'           },
+  BSC:      { chainId: '0x38',  rpc: 'https://bsc-dataseed.binance.org',         etherscan: 'https://api.bscscan.com/api'            },
+};
+const networkNames = Object.keys(NETWORKS);
+let netIdx = 0;
+let etherscanApiKey = localStorage.getItem('rEVMe_apikey') || '';
+ 
+// 4byte resolver cache
+const selectorCache = {};
+ 
+// ===========================
+// API KEY MODAL
+// ===========================
+function openApiKeyModal() {
+  document.getElementById('modal-overlay').style.display = 'flex';
+  document.getElementById('modal-apikey-input').value = etherscanApiKey;
+}
+function closeApiKeyModal() {
+  document.getElementById('modal-overlay').style.display = 'none';
+}
+function saveApiKey() {
+  etherscanApiKey = document.getElementById('modal-apikey-input').value.trim();
+  localStorage.setItem('rEVMe_apikey', etherscanApiKey);
+  log('ok', `Etherscan API key ${etherscanApiKey ? 'saved (' + etherscanApiKey.slice(0,6) + '…)' : 'cleared'}.`);
+  closeApiKeyModal();
+}
+ 
+// ===========================
+// ABI OVERLAY
+// ===========================
+function loadABI() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json';
+  input.onchange = async (e) => {
+    try {
+      const text = await e.target.files[0].text();
+      const abi = JSON.parse(text);
+      const arr = Array.isArray(abi) ? abi : (abi.abi || []);
+      let count = 0;
+      for(const item of arr) {
+        if(item.type !== 'function' && item.type !== 'event') continue;
+        const sig = item.name + '(' + (item.inputs||[]).map(i=>i.type).join(',') + ')';
+        // Compute selector (keccak4) using a simple browser-compatible method
+        const selector = await computeSelector(sig);
+        if(selector) {
+          KNOWN_SELECTORS[selector] = sig;
+          selectorCache[selector] = sig;
+          count++;
+        }
+      }
+      log('ok', `ABI loaded: ${count} function/event signatures registered.`);
+      // Re-render disassembly with new annotations
+      if(currentInstructions.length) renderDisassembly(currentInstructions, null);
+    } catch(err) {
+      log('err', `ABI parse error: ${err.message}`);
+    }
+  };
+  input.click();
+}
+ 
+// ===========================
+// KECCAK-256 (Pure JS, no dependencies)
+// ===========================
+const keccak256 = (() => {
+  const RC = [
+    0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
+    0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
+    0x000000000000008an, 0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
+    0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
+    0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
+    0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n
+  ];
+  const ROTC = [1,3,6,10,15,21,28,36,45,55,2,14,27,41,56,8,25,43,62,18,39,61,20,44];
+  const PI = [10,7,11,17,18,3,5,16,8,21,24,4,15,23,19,13,12,2,20,14,22,9,6,1];
+  const MASK = (1n << 64n) - 1n;
+  const rot = (x, n) => ((x << BigInt(n)) | (x >> BigInt(64 - n))) & MASK;
+
+  function keccakF(s) {
+    for (let round = 0; round < 24; round++) {
+      const C = [];
+      for (let x = 0; x < 5; x++) C[x] = s[x] ^ s[x+5] ^ s[x+10] ^ s[x+15] ^ s[x+20];
+      for (let x = 0; x < 5; x++) {
+        const t = C[(x+4)%5] ^ rot(C[(x+1)%5], 1);
+        for (let y = 0; y < 25; y += 5) s[x+y] = (s[x+y] ^ t) & MASK;
+      }
+      let last = s[1];
+      for (let i = 0; i < 24; i++) {
+        const j = PI[i]; const temp = s[j];
+        s[j] = rot(last, ROTC[i]); last = temp;
+      }
+      for (let y = 0; y < 25; y += 5) {
+        const t = [s[y], s[y+1], s[y+2], s[y+3], s[y+4]];
+        for (let x = 0; x < 5; x++) s[y+x] = (t[x] ^ ((~t[(x+1)%5] & MASK) & t[(x+2)%5])) & MASK;
+      }
+      s[0] = (s[0] ^ RC[round]) & MASK;
+    }
+  }
+
+  return function(input) {
+    const bytes = (typeof input === 'string') ? new TextEncoder().encode(input) : input;
+    const rate = 136;
+    const padLen = Math.ceil((bytes.length + 1) / rate) * rate;
+    const padded = new Uint8Array(padLen);
+    padded.set(bytes);
+    padded[bytes.length] = 0x01;
+    padded[padLen - 1] |= 0x80;
+    const s = new Array(25).fill(0n);
+    for (let off = 0; off < padded.length; off += rate) {
+      for (let i = 0; i < 17; i++) {
+        let v = 0n;
+        for (let j = 0; j < 8; j++) v |= BigInt(padded[off + i*8 + j]) << BigInt(j*8);
+        s[i] ^= v;
+      }
+      keccakF(s);
+    }
+    const out = new Uint8Array(32);
+    for (let i = 0; i < 4; i++) {
+      for (let j = 0; j < 8; j++) out[i*8+j] = Number((s[i] >> BigInt(j*8)) & 0xffn);
+    }
+    return Array.from(out).map(b => b.toString(16).padStart(2,'0')).join('');
+  };
+})();
+
+function computeSelector(sig) {
+  try {
+    return keccak256(sig).slice(0, 8);
+  } catch { return null; }
+}
+ 
+// ===========================
+// RPC BYTECODE FETCH
+// ===========================
+async function fetchBytecodeRPC(address, network) {
+  const { rpc } = NETWORKS[network];
+  log('info', `[RPC] Fetching bytecode via ${network} → ${rpc}`);
+  const body = JSON.stringify({
+    jsonrpc: '2.0', method: 'eth_getCode',
+    params: [address, 'latest'], id: 1
+  });
+  const res = await fetch(rpc, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body
+  });
+  const data = await res.json();
+  if(data.error) throw new Error(data.error.message);
+  if(!data.result || data.result === '0x') throw new Error('No bytecode at this address (EOA or empty contract)');
+  return data.result;
+}
+ 
+// ===========================
+// ETHERSCAN ABI + SOURCE FETCH
+// ===========================
+async function fetchEtherscanABI(address, network) {
+  const { etherscan } = NETWORKS[network];
+  const key = etherscanApiKey || 'YourApiKeyToken';
+  const url = `${etherscan}?module=contract&action=getabi&address=${address}&apikey=${key}`;
+  log('info', `[Etherscan] Fetching ABI for ${address.slice(0,10)}…`);
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if(data.status === '1' && data.result !== 'Contract source code not verified') {
+      const abi = JSON.parse(data.result);
+      let count = 0;
+      for(const item of abi) {
+        if(item.type !== 'function' && item.type !== 'event') continue;
+        const sig = item.name + '(' + (item.inputs||[]).map(i=>i.type).join(',') + ')';
+        const selector = sig2selector(sig);
+        if(selector) { KNOWN_SELECTORS[selector] = sig; count++; }
+      }
+      log('ok', `[Etherscan] ABI verified — ${count} signatures loaded.`);
+      return true;
+    } else {
+      log('warn', `[Etherscan] Contract unverified or API limit reached. Using 4byte.directory fallback.`);
+      return false;
+    }
+  } catch(e) {
+    log('warn', `[Etherscan] ABI fetch failed: ${e.message}`);
+    return false;
+  }
+}
+ 
+// Compute 4-byte function selector using real Keccak-256
+function sig2selector(sig) {
+  try {
+    return keccak256(sig).slice(0, 8);
+  } catch {
+    // Fallback: lookup in known selectors table
+    for(const [k,v] of Object.entries(KNOWN_SELECTORS)) { if(v===sig) return k; }
+    return null;
+  }
+}
+ 
+// ===========================
+// 4BYTE.DIRECTORY RESOLVER
+// ===========================
+async function resolve4byte(selectors) {
+  const unknown = selectors.filter(s => s !== '—' && s.startsWith('0x') && !KNOWN_SELECTORS[s.slice(2).toLowerCase()]);
+  if(!unknown.length) return;
+  log('info', `[4byte] Resolving ${unknown.length} unknown selector(s)…`);
+  let resolved = 0;
+  // Batch: resolve up to 8 in parallel
+  const chunks = [];
+  for(let i=0;i<Math.min(unknown.length,16);i+=4) chunks.push(unknown.slice(i,i+4));
+  for(const chunk of chunks) {
+    await Promise.all(chunk.map(async (sel) => {
+      const hex = sel.slice(2);
+      if(selectorCache[hex]) { KNOWN_SELECTORS[hex] = selectorCache[hex]; resolved++; return; }
+      try {
+        const url = `https://www.4byte.directory/api/v1/signatures/?hex_signature=0x${hex}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if(data.results && data.results.length > 0) {
+          const sig = data.results[0].text_signature;
+          KNOWN_SELECTORS[hex] = sig;
+          selectorCache[hex] = sig;
+          resolved++;
+          log('info', `[4byte] 0x${hex} → <span style="color:var(--accent4)">${sig}</span>`);
+        }
+      } catch(e) { /* ignore individual failures */ }
+    }));
+  }
+  log('ok', `[4byte] Resolved ${resolved}/${unknown.length} selectors.`);
+}
+ 
+// ===========================
+// MAIN ANALYZE (async)
+// ===========================
+async function analyzeContract() {
+  const input = document.getElementById('address-input').value.trim();
+  if(!input) { log('warn','No input provided.'); return; }
+ 
+  const netName = networkNames[netIdx];
+  setStatus('loading', `Analyzing…`);
+  log('info', `Target: ${input.slice(0,42)}${input.length>42?'…':''} · Network: ${netName}`);
+ 
+  let bytecode = input;
+  let resolvedAddress = null;
+ 
+  // === CASE 1: Contract address ===
+  if(/^0x[0-9a-fA-F]{40}$/.test(input)) {
+    resolvedAddress = input;
+    currentAddress = input;
+    log('info', `Contract address detected. Fetching bytecode via RPC…`);
+    try {
+      bytecode = await fetchBytecodeRPC(input, netName);
+      log('ok', `[RPC] Bytecode fetched: ${bytecode.length/2 - 1} bytes`);
+      // Try Etherscan ABI
+      await fetchEtherscanABI(input, netName);
+    } catch(err) {
+      log('err', `[RPC] Failed: ${err.message}`);
+      log('warn', 'Falling back to sample bytecode for demo purposes.');
+      bytecode = SAMPLE_BYTECODE;
+    }
+  } else {
+    log('info', 'Bytecode input detected. Disassembling…');
+  }
+ 
+  const instructions = disassemble(bytecode);
+  if(!instructions.length) { log('err', 'Failed to decode bytecode. Check format.'); setStatus('ready','Ready'); return; }
+ 
+  currentInstructions = instructions;
+  currentFunctions = detectFunctions(instructions);
+ 
+  // === RESOLVE UNKNOWN SELECTORS via 4byte ===
+  const unknownSels = currentFunctions.filter(f => f.selector !== '—' && !KNOWN_SELECTORS[f.selector.slice(2).toLowerCase()]).map(f=>f.selector);
+  if(unknownSels.length) {
+    await resolve4byte(unknownSels);
+    // Re-enrich function names after resolution
+    for(const fn of currentFunctions) {
+      if(fn.selector === '—') continue;
+      const hex = fn.selector.slice(2).toLowerCase();
+      if(KNOWN_SELECTORS[hex] && fn.name.startsWith('func_')) {
+        fn.name = KNOWN_SELECTORS[hex];
+        fn.sig = KNOWN_SELECTORS[hex];
+      }
+    }
+  }
+ 
+  const vulns = scanVulnerabilities(instructions);
+  const ercs = detectERC(currentFunctions);
+ 
+  log('ok', `Disassembly: ${instructions.length} instructions · ${currentFunctions.length} functions · ${vulns.length} issues`);
+ 
+  // Update info panel
+  const byteLen = bytecode.replace(/^0x/,'').length/2;
+  document.getElementById('info-address').textContent = resolvedAddress || `<bytecode>`;
+  document.getElementById('info-size').textContent = `${byteLen} bytes`;
+  document.getElementById('info-opcodes').textContent = `${instructions.length} instructions`;
+  document.getElementById('info-compiler').textContent = detectCompiler(bytecode);
+  document.getElementById('info-proxy').textContent = currentFunctions.some(f=>f.name.includes('implementation')) ? '⚠ Proxy detected' : 'None detected';
+  document.getElementById('info-erc').textContent = ercs;
+  document.getElementById('fn-count').textContent = `${currentFunctions.length} fns`;
+ 
+  // Vulns
+  document.getElementById('vuln-count').textContent = `${vulns.length} issues`;
+  let vulnHtml = '';
+  for(const v of vulns) {
+    vulnHtml += `<div class="vuln-item">
+      <div class="vuln-severity sev-${v.severity}"></div>
+      <div class="vuln-content">
+        <div class="vuln-name">${v.name}</div>
+        <div class="vuln-loc">${v.loc}</div>
+        <div class="vuln-desc">${v.desc}</div>
+      </div>
+    </div>`;
+  }
+  document.getElementById('vuln-list').innerHTML = vulnHtml || '<div style="padding:10px;color:var(--text3);font-size:10px;">No vulnerabilities detected.</div>';
+ 
+  if(vulns.filter(v=>v.severity==='high').length > 0) {
+    document.getElementById('status-vuln').innerHTML = `<span class="status-warn">⚠ ${vulns.filter(v=>v.severity==='high').length} HIGH SEVERITY</span>`;
+  } else {
+    document.getElementById('status-vuln').innerHTML = '';
+  }
+ 
+  // Functions list
+  let fnHtml = '';
+  for(const fn of currentFunctions) {
+    const safeSelector = fn.selector.replace(/'/g,'');
+    fnHtml += `<div class="fn-item" onclick="selectFunction(this,'${safeSelector}')">
+      <div class="fn-selector">${fn.selector}
+        ${fn.isView?'<span class="fn-tag tag-view">view</span>':''}
+        ${fn.isPayable?'<span class="fn-tag tag-payable">payable</span>':''}
+        ${fn.isVuln?'<span class="fn-tag tag-vuln">⚠</span>':''}
+      </div>
+      <div class="fn-name">${fn.name.split('(')[0]}</div>
+      <div class="fn-sig">${fn.sig||''}</div>
+    </div>`;
+  }
+  document.getElementById('functions-list').innerHTML = fnHtml;
+ 
+  renderDisassembly(instructions, null);
+  renderHex(bytecode);
+  renderOpcodeDistribution(instructions);
+ 
+  // Storage
+  const storageSlots = buildStorageLayout(instructions);
+  let storHtml = '';
+  for(const s of storageSlots) {
+    storHtml += `<tr><td>${s.slot}</td><td>${s.type}</td><td>${s.name}</td></tr>`;
+  }
+  document.getElementById('storage-table').innerHTML = storHtml;
+ 
+  // Strings
+  const strings = extractStrings(instructions);
+  let strHtml = strings.map(s => `<div style="padding:3px 0;border-bottom:1px solid var(--border);"><span style="color:var(--text3);margin-right:10px;">0x${s.offset.toString(16).padStart(4,'0')}</span><span style="color:var(--accent3)">"${s.value}"</span></div>`).join('');
+  document.getElementById('strings-content').innerHTML = strHtml || '<div style="color:var(--text3);">No printable strings found.</div>';
+ 
+  // Decompiler
+  document.getElementById('decompile-content').innerHTML = decompile(instructions, currentFunctions);
+ 
+  setStatus('ok', 'Analysis complete');
+  renderCFG(instructions, currentFunctions);
+}
+ 
+function setStatus(type, msg) {
+  const el = document.getElementById('status-ready');
+  el.textContent = msg;
+  el.style.color = type==='ok' ? 'var(--accent3)' : type==='loading' ? 'var(--accent4)' : 'var(--text2)';
+}
+ 
+function detectCompiler(bytecode) {
+  const bz = bytecode.toLowerCase();
+  if(bz.includes('a265627a7a72')) return 'Solidity <0.5.x (legacy)';
+  if(bz.includes('a264697066')) return 'Solidity ≥0.6.x (IPFS metadata)';
+  if(bz.includes('a2646970667358')) return 'Solidity ≥0.8.x';
+  return 'Unknown / Vyper';
+}
+ 
+// ===========================
+// CFG RENDERING (SVG, hierarchical layout, full opcodes)
+// ===========================
+let cfgViewBox = { x: 0, y: 0, w: 1200, h: 800 };
+let cfgDrag = { active: false, lastX: 0, lastY: 0 };
+let cfgSettings = { showConstructor: true, showDeadCode: false };
+let cfgLastInstructions = null;
+let cfgLastFunctions = null;
+
+// Toggle settings panel
+function toggleCfgSettings(e) {
+  e.stopPropagation();
+  document.getElementById('cfg-settings-panel').classList.toggle('visible');
+}
+// Close settings when clicking outside
+document.addEventListener('click', (e) => {
+  const panel = document.getElementById('cfg-settings-panel');
+  if(panel && !panel.contains(e.target) && e.target.id !== 'cfg-settings-btn') {
+    panel.classList.remove('visible');
+  }
+});
+// Settings changed → re-render CFG
+function cfgSettingChanged() {
+  cfgSettings.showConstructor = document.getElementById('cfg-opt-constructor').checked;
+  cfgSettings.showDeadCode = document.getElementById('cfg-opt-deadcode').checked;
+  if(cfgLastInstructions) renderCFG(cfgLastInstructions, cfgLastFunctions);
+}
+
+// Opcode badge color map (like ByteGraph)
+function cfgOpcodeColor(op) {
+  if(!op) return { bg: '#1a1f2e', fg: '#6b7a99' };
+  if(op.startsWith('PUSH') || op === 'PUSH0') return { bg: '#172340', fg: '#60a5fa' };
+  if(op === 'JUMP' || op === 'JUMPI' || op === 'JUMPDEST') return { bg: '#0f2a1a', fg: '#34d399' };
+  if(['CALL','STATICCALL','DELEGATECALL','CALLCODE','CREATE','CREATE2'].includes(op)) return { bg: '#2a1a0a', fg: '#f59e0b' };
+  if(['RETURN','STOP'].includes(op)) return { bg: '#0a2a1a', fg: '#10b981' };
+  if(['REVERT','INVALID','SELFDESTRUCT'].includes(op)) return { bg: '#2a0a0a', fg: '#f87171' };
+  if(['MSTORE','MSTORE8','MLOAD','SSTORE','SLOAD','CALLDATALOAD','CALLDATACOPY','CODECOPY','RETURNDATACOPY','EXTCODECOPY'].includes(op)) return { bg: '#0a1a2a', fg: '#22d3ee' };
+  if(['KECCAK256'].includes(op)) return { bg: '#1a0a2a', fg: '#c084fc' };
+  if(['CALLVALUE','CALLDATASIZE','CODESIZE','RETURNDATASIZE','EXTCODESIZE','GAS','GASPRICE','ADDRESS','ORIGIN','CALLER','BALANCE','SELFBALANCE','CHAINID','BASEFEE','COINBASE','TIMESTAMP','NUMBER','DIFFICULTY','GASLIMIT','BLOCKHASH','EXTCODEHASH'].includes(op)) return { bg: '#2a1a00', fg: '#fbbf24' };
+  if(['LT','GT','SLT','SGT','EQ','ISZERO','AND','OR','XOR','NOT','BYTE','SHL','SHR','SAR','SIGNEXTEND'].includes(op)) return { bg: '#1a1520', fg: '#a78bfa' };
+  if(['ADD','SUB','MUL','DIV','SDIV','MOD','SMOD','ADDMOD','MULMOD','EXP'].includes(op)) return { bg: '#1a1520', fg: '#a78bfa' };
+  if(op.startsWith('LOG')) return { bg: '#0a1a15', fg: '#34d399' };
+  if(op.startsWith('DUP') || op.startsWith('SWAP') || op === 'POP') return { bg: '#141720', fg: '#4b5563' };
+  return { bg: '#1a1f2e', fg: '#6b7a99' };
+}
+
+// Build a map: JUMPDEST offset → function name (from selector dispatcher pattern)
+function buildFuncLabelMap(instructions) {
+  const map = {};
+  for(let i = 0; i < instructions.length - 4; i++) {
+    const ins = instructions[i];
+    if(ins.opcode === 'PUSH4' && ins.operand) {
+      const sel = ins.operand.slice(2).toLowerCase();
+      const next1 = instructions[i+1];
+      if(next1 && next1.opcode === 'EQ') {
+        // Find the PUSH2/PUSH3 + JUMPI after EQ
+        for(let j = i+2; j < Math.min(i+5, instructions.length); j++) {
+          if(instructions[j].opcode?.startsWith('PUSH') && instructions[j].operand) {
+            const target = parseInt(instructions[j].operand, 16);
+            const funcName = KNOWN_SELECTORS[sel] || `func_${sel}`;
+            map[target] = funcName;
+            break;
+          }
+        }
+      }
+    }
+  }
+  return map;
+}
+
+function renderCFG(instructions, functions) {
+  // Save for re-render on settings change
+  cfgLastInstructions = instructions;
+  cfgLastFunctions = functions;
+  const container = document.getElementById('cfg-container');
+  const svg = document.getElementById('cfg-svg');
+  if(!container || !svg) return;
+
+  // Build function label map (JUMPDEST offset → function name)
+  const funcLabels = buildFuncLabelMap(instructions);
+
+  // === Extract basic blocks ===
+  const allBlocks = [];
+  let cur = null;
+  const jumpdests = new Set();
+  for(const ins of instructions) {
+    if(ins.opcode === 'JUMPDEST') jumpdests.add(ins.offset);
+  }
+
+  // Find where the first JUMPDEST is (constructor boundary)
+  let firstJumpdestOffset = Infinity;
+  for(const ins of instructions) {
+    if(ins.opcode === 'JUMPDEST') { firstJumpdestOffset = ins.offset; break; }
+  }
+
+  for(const ins of instructions) {
+    if(ins.opcode==='JUMPDEST' || !cur) {
+      if(cur) allBlocks.push(cur);
+      cur = { start: ins.offset, instructions: [ins], isEntry: ins.opcode==='JUMPDEST' };
+    } else {
+      cur.instructions.push(ins);
+    }
+    if(['JUMP','JUMPI','STOP','RETURN','REVERT','INVALID','SELFDESTRUCT'].includes(ins.opcode)) {
+      if(cur) allBlocks.push(cur);
+      cur = null;
+    }
+  }
+  if(cur) allBlocks.push(cur);
+
+  // Mark blocks as constructor (offset < first JUMPDEST)
+  allBlocks.forEach(b => {
+    b._isConstructor = b.start < firstJumpdestOffset;
+  });
+
+  const blockMap = {};
+  allBlocks.forEach((b,i) => { blockMap[b.start] = i; });
+
+  // === Build edges (on ALL blocks first for reachability analysis) ===
+  const edges = [];
+  const allChildren = allBlocks.map(() => []);
+  const allParents = allBlocks.map(() => []);
+
+  allBlocks.forEach((block, idx) => {
+    const lastIns = block.instructions[block.instructions.length - 1];
+    const prevIns = block.instructions.length >= 2 ? block.instructions[block.instructions.length - 2] : null;
+
+    if(lastIns.opcode === 'JUMP') {
+      if(prevIns && prevIns.opcode?.startsWith('PUSH') && prevIns.operand) {
+        const target = parseInt(prevIns.operand, 16);
+        if(blockMap[target] !== undefined) {
+          edges.push({ from: idx, to: blockMap[target], type: 'jump' });
+          allChildren[idx].push(blockMap[target]);
+          allParents[blockMap[target]].push(idx);
+        }
+      }
+    } else if(lastIns.opcode === 'JUMPI') {
+      if(prevIns && prevIns.opcode?.startsWith('PUSH') && prevIns.operand) {
+        const target = parseInt(prevIns.operand, 16);
+        if(blockMap[target] !== undefined) {
+          edges.push({ from: idx, to: blockMap[target], type: 'true' });
+          allChildren[idx].push(blockMap[target]);
+          allParents[blockMap[target]].push(idx);
+        }
+      }
+      if(idx + 1 < allBlocks.length) {
+        edges.push({ from: idx, to: idx + 1, type: 'false' });
+        allChildren[idx].push(idx + 1);
+        allParents[idx + 1].push(idx);
+      }
+    } else if(!['STOP','RETURN','REVERT','INVALID','SELFDESTRUCT'].includes(lastIns.opcode)) {
+      if(idx + 1 < allBlocks.length) {
+        edges.push({ from: idx, to: idx + 1, type: 'seq' });
+        allChildren[idx].push(idx + 1);
+        allParents[idx + 1].push(idx);
+      }
+    }
+  });
+
+  // === Reachability analysis (BFS from block 0) ===
+  const reachable = new Set();
+  {
+    const rq = [0];
+    reachable.add(0);
+    let rh = 0;
+    while(rh < rq.length) {
+      const n = rq[rh++];
+      for(const c of allChildren[n]) {
+        if(!reachable.has(c)) { reachable.add(c); rq.push(c); }
+      }
+    }
+  }
+
+  // === Filter blocks based on settings ===
+  const blockVisible = allBlocks.map((b, i) => {
+    if(b._isConstructor && !cfgSettings.showConstructor) return false;
+    if(!reachable.has(i) && !cfgSettings.showDeadCode) return false;
+    return true;
+  });
+
+  // Build filtered blocks list with re-mapped indices
+  const blocks = [];
+  const oldToNew = {};
+  allBlocks.forEach((b, i) => {
+    if(blockVisible[i]) {
+      oldToNew[i] = blocks.length;
+      blocks.push(b);
+    }
+  });
+
+  // Re-map edges to filtered indices
+  const filteredEdges = edges.filter(e => blockVisible[e.from] && blockVisible[e.to])
+    .map(e => ({ from: oldToNew[e.from], to: oldToNew[e.to], type: e.type }));
+
+  // Build children/parents for filtered graph
+  const children = blocks.map(() => []);
+  const parents = blocks.map(() => []);
+  filteredEdges.forEach(e => {
+    children[e.from].push(e.to);
+    parents[e.to].push(e.from);
+  });
+
+  // Update info
+  const infoEl = document.getElementById('cfg-settings-info');
+  if(infoEl) {
+    const hidden = allBlocks.length - blocks.length;
+    infoEl.textContent = `${blocks.length} blocks shown` + (hidden > 0 ? ` (${hidden} hidden)` : '');
+  }
+
+  // === Hierarchical layout (BFS layering) ===
+  const INS_LINE_H = 16;
+  const BLOCK_PAD_TOP = 28;
+  const BLOCK_PAD_BOT = 10;
+  const BLOCK_W = 260;
+  const GAP_X = 50;
+  const GAP_Y = 50;
+  const PAD = 60;
+
+  // Compute dynamic block heights (add room for function label if present)
+  blocks.forEach(block => {
+    const hasLabel = funcLabels[block.start] !== undefined;
+    block._funcLabel = funcLabels[block.start] || null;
+    block._h = BLOCK_PAD_TOP + (hasLabel ? 16 : 0) + block.instructions.length * INS_LINE_H + BLOCK_PAD_BOT;
+  });
+
+  // BFS from node 0 to assign layers
+  const layers = new Array(blocks.length).fill(-1);
+  layers[0] = 0;
+  const queue = [0];
+  let head = 0;
+  while(head < queue.length) {
+    const node = queue[head++];
+    for(const child of children[node]) {
+      if(layers[child] === -1) {
+        layers[child] = layers[node] + 1;
+        queue.push(child);
+      }
+    }
+  }
+  // Assign unreachable nodes to max layer + 1
+  const maxLayer = Math.max(...layers.filter(l => l >= 0), 0);
+  for(let i = 0; i < blocks.length; i++) {
+    if(layers[i] === -1) layers[i] = maxLayer + 1;
+  }
+
+  // Group blocks by layer
+  const layerGroups = {};
+  for(let i = 0; i < blocks.length; i++) {
+    const l = layers[i];
+    if(!layerGroups[l]) layerGroups[l] = [];
+    layerGroups[l].push(i);
+  }
+
+  // Compute Y position per layer (cumulative max height per layer)
+  const layerKeys = Object.keys(layerGroups).map(Number).sort((a,b) => a - b);
+  const layerY = {};
+  let cumY = PAD;
+  for(const l of layerKeys) {
+    layerY[l] = cumY;
+    const maxH = Math.max(...layerGroups[l].map(i => blocks[i]._h));
+    cumY += maxH + GAP_Y;
+  }
+
+  // Assign X positions within each layer
+  for(const l of layerKeys) {
+    const group = layerGroups[l];
+    const totalW = group.length * BLOCK_W + (group.length - 1) * GAP_X;
+    let startX = PAD + Math.max(0, (800 - totalW) / 2); // try to center
+    group.forEach((blockIdx, i) => {
+      blocks[blockIdx]._x = startX + i * (BLOCK_W + GAP_X);
+      blocks[blockIdx]._y = layerY[l];
+    });
+  }
+
+  // Compute total dimensions
+  let maxX = 0, maxY = 0;
+  blocks.forEach(b => {
+    maxX = Math.max(maxX, b._x + BLOCK_W + PAD);
+    maxY = Math.max(maxY, b._y + b._h + PAD);
+  });
+  cfgViewBox = { x: 0, y: 0, w: Math.max(maxX, 600), h: Math.max(maxY, 400) };
+
+  // === Build SVG ===
+  let svgContent = `<defs>
+    <marker id="arrow-true" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,3 L0,6" fill="#10b981"/>
+    </marker>
+    <marker id="arrow-false" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,3 L0,6" fill="#ef4444"/>
+    </marker>
+    <marker id="arrow-jump" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,3 L0,6" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrow-seq" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,3 L0,6" fill="#3d4a63"/>
+    </marker>
+    <pattern id="grid-pattern" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="10" cy="10" r="0.8" fill="#1e2535" opacity="0.5"/>
+    </pattern>
+  </defs>`;
+
+  // Blueprint grid background
+  svgContent += `<rect x="${cfgViewBox.x - 1000}" y="${cfgViewBox.y - 1000}" width="${cfgViewBox.w + 3000}" height="${cfgViewBox.h + 3000}" fill="url(#grid-pattern)"/>`;
+
+  // === Draw edges (behind blocks) ===
+  for(const edge of filteredEdges) {
+    const fromB = blocks[edge.from];
+    const toB = blocks[edge.to];
+    if(!fromB || !toB) continue;
+
+    const lastOp = fromB.instructions[fromB.instructions.length - 1]?.opcode;
+    const isJumpi = lastOp === 'JUMPI';
+
+    // For JUMPI blocks: true exits from right dot, false from left dot
+    let x1, y1;
+    if(isJumpi && edge.type === 'true') {
+      x1 = fromB._x + BLOCK_W * 0.65;
+      y1 = fromB._y + fromB._h;
+    } else if(isJumpi && edge.type === 'false') {
+      x1 = fromB._x + BLOCK_W * 0.35;
+      y1 = fromB._y + fromB._h;
+    } else {
+      x1 = fromB._x + BLOCK_W / 2;
+      y1 = fromB._y + fromB._h;
+    }
+
+    const x2 = toB._x + BLOCK_W / 2;
+    const y2 = toB._y;
+
+    const cls = edge.type === 'true' ? 'cfg-edge-true' : edge.type === 'false' ? 'cfg-edge-false' : edge.type === 'jump' ? 'cfg-edge-jump' : 'cfg-edge-seq';
+    const marker = `url(#arrow-${edge.type})`;
+
+    // Smart Bézier: handle backward edges (loops)
+    const dy = y2 - y1;
+    if(dy > 0) {
+      // Forward edge
+      const curveStrength = Math.min(Math.abs(x2 - x1) * 0.4, 100);
+      const cy1 = y1 + Math.max(dy * 0.3, 30);
+      const cy2 = y2 - Math.max(dy * 0.3, 30);
+      svgContent += `<path class="cfg-edge ${cls}" d="M${x1},${y1} C${x1},${cy1} ${x2},${cy2} ${x2},${y2}" marker-end="${marker}"/>`;
+    } else {
+      // Backward edge (loop) — route around the side
+      const loopOffset = 40 + Math.abs(edge.from - edge.to) * 8;
+      const sideX = Math.max(fromB._x, toB._x) + BLOCK_W + loopOffset;
+      svgContent += `<path class="cfg-edge ${cls}" d="M${x1},${y1} C${x1},${y1+40} ${sideX},${y1+40} ${sideX},${(y1+y2)/2} S${sideX},${y2-40} ${x2},${y2}" marker-end="${marker}"/>`;
+    }
+  }
+
+  // === Draw blocks ===
+  blocks.forEach((block, idx) => {
+    const lastOp = block.instructions[block.instructions.length-1]?.opcode;
+    let fill = '#0d1017', stroke = '#252d42';
+    if(lastOp==='REVERT'||lastOp==='INVALID') { stroke='#ef4444'; fill='#140a0a'; }
+    else if(lastOp==='RETURN'||lastOp==='STOP') { stroke='#10b981'; fill='#0a1510'; }
+    else if(lastOp==='JUMPI') { stroke='#7c3aed'; fill='#100d18'; }
+    else if(lastOp==='SELFDESTRUCT') { stroke='#f97316'; fill='#1a100a'; }
+    else if(idx===0) { stroke='#00d4ff'; fill='#0a1218'; }
+
+    const offsetHex = '0x' + block.start.toString(16).padStart(4,'0');
+    const bx = block._x, by = block._y, bw = BLOCK_W, bh = block._h;
+    const hasLabel = !!block._funcLabel;
+
+    svgContent += `<g class="cfg-node" data-offset="${block.start}" onclick="cfgNodeClick(${block.start})">`;
+    // Block background with rounded corners
+    svgContent += `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="6" ry="6" fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`;
+    // Header bar
+    svgContent += `<rect x="${bx}" y="${by}" width="${bw}" height="20" rx="6" ry="6" fill="${stroke}" opacity="0.3"/>`;
+    svgContent += `<rect x="${bx}" y="${by+14}" width="${bw}" height="6" fill="${stroke}" opacity="0.3"/>`;
+    // Offset label
+    svgContent += `<text x="${bx+8}" y="${by+14}" fill="#c9d1e0" font-size="10" font-weight="700" font-family="JetBrains Mono">${offsetHex}</text>`;
+    svgContent += `<text x="${bx + bw - 8}" y="${by+14}" fill="#4b5563" font-size="9" font-family="JetBrains Mono" text-anchor="end">${block.instructions.length} ops</text>`;
+
+    // Function name label (if this block is a function entry)
+    if(hasLabel) {
+      const labelText = block._funcLabel.length > 28 ? block._funcLabel.slice(0, 26) + '…' : block._funcLabel;
+      svgContent += `<rect x="${bx+4}" y="${by+22}" width="${bw-8}" height="14" rx="3" fill="#1a0a2a" stroke="#c084fc" stroke-width="0.5"/>`;
+      svgContent += `<text x="${bx+10}" y="${by+32}" fill="#c084fc" font-size="9" font-weight="600" font-family="JetBrains Mono">ƒ ${labelText}</text>`;
+    }
+
+    // All instructions with colored badges
+    const insOffsetY = hasLabel ? 16 : 0;
+    block.instructions.forEach((ins, li) => {
+      const iy = by + BLOCK_PAD_TOP + insOffsetY + li * INS_LINE_H;
+      const off4 = ins.offset.toString(16).padStart(4,'0');
+      const hexByte = ins.byte !== undefined ? ins.byte.toString(16).padStart(2,'0') : '--';
+      const colors = cfgOpcodeColor(ins.opcode);
+      const opW = Math.min(ins.opcode.length * 7 + 8, 120);
+
+      // Offset
+      svgContent += `<text x="${bx+8}" y="${iy+11}" fill="#3d4a63" font-size="9" font-family="JetBrains Mono">${off4}</text>`;
+      // Hex byte
+      svgContent += `<text x="${bx+48}" y="${iy+11}" fill="#4b5563" font-size="9" font-family="JetBrains Mono">${hexByte}</text>`;
+      // Opcode badge
+      svgContent += `<rect x="${bx+70}" y="${iy}" width="${opW}" height="14" rx="3" fill="${colors.bg}" stroke="${colors.fg}" stroke-width="0.5" opacity="0.9"/>`;
+      svgContent += `<text x="${bx+74}" y="${iy+10}" fill="${colors.fg}" font-size="9" font-weight="600" font-family="JetBrains Mono">${ins.opcode}</text>`;
+      // Operand (trimmed)
+      if(ins.operand) {
+        const opDisplay = ins.operand.length > 18 ? ins.operand.slice(0,16) + '…' : ins.operand;
+        svgContent += `<text x="${bx+74+opW+4}" y="${iy+10}" fill="#6b7a99" font-size="9" font-family="JetBrains Mono">${opDisplay}</text>`;
+      }
+      // Function selector comment (PUSH4 with known selector)
+      if(ins.opcode === 'PUSH4' && ins.operand) {
+        const sel = ins.operand.slice(2).toLowerCase();
+        const fname = KNOWN_SELECTORS[sel];
+        if(fname) {
+          const commentText = fname.length > 20 ? fname.slice(0, 18) + '…' : fname;
+          svgContent += `<text x="${bx+74+opW+4}" y="${iy+10}" fill="#f59e0b" font-size="8" font-style="italic" font-family="JetBrains Mono">; ${commentText}</text>`;
+        }
+      }
+    });
+
+    // Branch dots for JUMPI blocks
+    if(lastOp === 'JUMPI') {
+      // False dot (red, left)
+      svgContent += `<circle cx="${bx + bw * 0.35}" cy="${by + bh}" r="4" fill="#ef4444" stroke="#0d1017" stroke-width="1.5"/>`;
+      // True dot (green, right)
+      svgContent += `<circle cx="${bx + bw * 0.65}" cy="${by + bh}" r="4" fill="#10b981" stroke="#0d1017" stroke-width="1.5"/>`;
+      // Labels
+      svgContent += `<text x="${bx + bw * 0.35 - 6}" y="${by + bh + 12}" fill="#ef4444" font-size="7" font-family="JetBrains Mono">F</text>`;
+      svgContent += `<text x="${bx + bw * 0.65 - 4}" y="${by + bh + 12}" fill="#10b981" font-size="7" font-family="JetBrains Mono">T</text>`;
+    }
+
+    svgContent += `</g>`;
+  });
+
+  // Summary text
+  const hiddenCount = allBlocks.length - blocks.length;
+  const hiddenText = hiddenCount > 0 ? ` · ${hiddenCount} hidden` : '';
+  svgContent += `<text x="${PAD}" y="${maxY - 15}" fill="#3d4a63" font-size="10" font-family="JetBrains Mono">${blocks.length} blocks · ${filteredEdges.length} edges${hiddenText}</text>`;
+
+  svg.setAttribute('viewBox', `${cfgViewBox.x} ${cfgViewBox.y} ${cfgViewBox.w} ${cfgViewBox.h}`);
+  svg.innerHTML = svgContent;
+
+  log('ok', `CFG rendered: ${blocks.length} basic blocks, ${filteredEdges.length} edges${hiddenText}`);
+
+  // Setup pan/zoom handlers
+  setupCFGInteraction(container, svg);
+}
+ 
+function setupCFGInteraction(container, svg) {
+  container.onmousedown = (e) => {
+    cfgDrag.active = true;
+    cfgDrag.lastX = e.clientX;
+    cfgDrag.lastY = e.clientY;
+  };
+  container.onmousemove = (e) => {
+    if(!cfgDrag.active) return;
+    const dx = (e.clientX - cfgDrag.lastX) * (cfgViewBox.w / container.clientWidth);
+    const dy = (e.clientY - cfgDrag.lastY) * (cfgViewBox.h / container.clientHeight);
+    cfgViewBox.x -= dx;
+    cfgViewBox.y -= dy;
+    cfgDrag.lastX = e.clientX;
+    cfgDrag.lastY = e.clientY;
+    svg.setAttribute('viewBox', `${cfgViewBox.x} ${cfgViewBox.y} ${cfgViewBox.w} ${cfgViewBox.h}`);
+  };
+  container.onmouseup = () => { cfgDrag.active = false; };
+  container.onmouseleave = () => { cfgDrag.active = false; };
+  container.onwheel = (e) => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 1.15 : 0.85;
+    const rect = container.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) / rect.width;
+    const my = (e.clientY - rect.top) / rect.height;
+    const newW = cfgViewBox.w * factor;
+    const newH = cfgViewBox.h * factor;
+    cfgViewBox.x += (cfgViewBox.w - newW) * mx;
+    cfgViewBox.y += (cfgViewBox.h - newH) * my;
+    cfgViewBox.w = newW;
+    cfgViewBox.h = newH;
+    svg.setAttribute('viewBox', `${cfgViewBox.x} ${cfgViewBox.y} ${cfgViewBox.w} ${cfgViewBox.h}`);
+  };
+}
+ 
+function cfgZoom(factor) {
+  const cx = cfgViewBox.x + cfgViewBox.w / 2;
+  const cy = cfgViewBox.y + cfgViewBox.h / 2;
+  cfgViewBox.w /= factor;
+  cfgViewBox.h /= factor;
+  cfgViewBox.x = cx - cfgViewBox.w / 2;
+  cfgViewBox.y = cy - cfgViewBox.h / 2;
+  document.getElementById('cfg-svg')?.setAttribute('viewBox', `${cfgViewBox.x} ${cfgViewBox.y} ${cfgViewBox.w} ${cfgViewBox.h}`);
+}
+ 
+function cfgReset() {
+  renderCFG(currentInstructions, currentFunctions);
+}
+ 
+function cfgNodeClick(offset) {
+  switchView('disasm');
+  const targetHex = offset.toString(16).padStart(4, '0');
+  const rows = document.querySelectorAll('.disasm-row');
+  for(const row of rows) {
+    const off = row.querySelector('.d-offset')?.textContent?.trim();
+    if(off === targetHex) {
+      document.querySelectorAll('.disasm-row').forEach(r => r.classList.remove('selected'));
+      row.classList.add('selected');
+      row.classList.add('flash');
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      document.getElementById('status-offset').textContent = '0x' + targetHex;
+      break;
+    }
+  }
+}
+ 
+// ===========================
+// SEARCH & NAVIGATION
+// ===========================
+let searchMatches = [];
+let searchCurrentIdx = -1;
+ 
+function openSearch() {
+  const bar = document.getElementById('search-bar');
+  bar.classList.add('visible');
+  const input = document.getElementById('search-input');
+  input.value = '';
+  input.focus();
+  searchMatches = [];
+  searchCurrentIdx = -1;
+  document.getElementById('search-count').textContent = '';
+  document.querySelectorAll('.disasm-row').forEach(r => { r.classList.remove('search-match', 'search-current'); });
+}
+ 
+function closeSearch() {
+  document.getElementById('search-bar').classList.remove('visible');
+  document.querySelectorAll('.disasm-row').forEach(r => { r.classList.remove('search-match', 'search-current'); });
+  searchMatches = [];
+  searchCurrentIdx = -1;
+  document.getElementById('search-count').textContent = '';
+}
+ 
+function performSearch(query) {
+  document.querySelectorAll('.disasm-row').forEach(r => { r.classList.remove('search-match', 'search-current'); });
+  searchMatches = [];
+  searchCurrentIdx = -1;
+ 
+  if(!query || query.length < 2) {
+    document.getElementById('search-count').textContent = '';
+    return;
+  }
+ 
+  const q = query.toLowerCase();
+  const rows = document.querySelectorAll('.disasm-row');
+  rows.forEach(row => {
+    const text = row.textContent.toLowerCase();
+    if(text.includes(q)) {
+      row.classList.add('search-match');
+      searchMatches.push(row);
+    }
+  });
+ 
+  document.getElementById('search-count').textContent = searchMatches.length ? `${searchMatches.length} found` : 'No results';
+ 
+  if(searchMatches.length > 0) {
+    searchCurrentIdx = 0;
+    highlightSearchCurrent();
+  }
+}
+ 
+function highlightSearchCurrent() {
+  searchMatches.forEach(r => r.classList.remove('search-current'));
+  if(searchCurrentIdx >= 0 && searchCurrentIdx < searchMatches.length) {
+    const row = searchMatches[searchCurrentIdx];
+    row.classList.add('search-current');
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    document.getElementById('search-count').textContent = `${searchCurrentIdx + 1}/${searchMatches.length}`;
+  }
+}
+ 
+function searchNext() {
+  if(!searchMatches.length) return;
+  searchCurrentIdx = (searchCurrentIdx + 1) % searchMatches.length;
+  highlightSearchCurrent();
+}
+ 
+function searchPrev() {
+  if(!searchMatches.length) return;
+  searchCurrentIdx = (searchCurrentIdx - 1 + searchMatches.length) % searchMatches.length;
+  highlightSearchCurrent();
+}
+ 
+function openGoto() {
+  const modal = document.getElementById('goto-modal');
+  modal.classList.add('visible');
+  const input = document.getElementById('goto-input');
+  input.value = '';
+  input.focus();
+}
+ 
+function closeGoto() {
+  document.getElementById('goto-modal').classList.remove('visible');
+}
+ 
+function gotoOffset(input) {
+  let offset;
+  const val = input.trim().toLowerCase();
+  if(val.startsWith('0x')) {
+    offset = parseInt(val, 16);
+  } else {
+    offset = parseInt(val, 10);
+  }
+  if(isNaN(offset)) return;
+ 
+  const targetHex = offset.toString(16).padStart(4, '0');
+  switchView('disasm');
+  const rows = document.querySelectorAll('.disasm-row');
+  for(const row of rows) {
+    const off = row.querySelector('.d-offset')?.textContent?.trim();
+    if(off === targetHex) {
+      document.querySelectorAll('.disasm-row').forEach(r => r.classList.remove('selected'));
+      row.classList.add('selected');
+      row.classList.add('flash');
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      document.getElementById('status-offset').textContent = '0x' + targetHex;
+      closeGoto();
+      return;
+    }
+  }
+  // If exact match not found, find nearest
+  let closest = null, closestDiff = Infinity;
+  for(const row of rows) {
+    const rowOff = parseInt(row.querySelector('.d-offset')?.textContent?.trim() || '0', 16);
+    if(Math.abs(rowOff - offset) < closestDiff) {
+      closestDiff = Math.abs(rowOff - offset);
+      closest = row;
+    }
+  }
+  if(closest) {
+    document.querySelectorAll('.disasm-row').forEach(r => r.classList.remove('selected'));
+    closest.classList.add('selected');
+    closest.classList.add('flash');
+    closest.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    closeGoto();
+  }
+}
+ 
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  // Ctrl+G or G (when not in input) → goto offset
+  if((e.ctrlKey && e.key === 'g') || (!e.ctrlKey && e.key === 'g' && !isInputFocused())) {
+    e.preventDefault();
+    openGoto();
+    return;
+  }
+  // Ctrl+F or / (when not in input) → search
+  if((e.ctrlKey && e.key === 'f') || (!e.ctrlKey && e.key === '/' && !isInputFocused())) {
+    e.preventDefault();
+    switchView('disasm');
+    openSearch();
+    return;
+  }
+  // Escape → close modals
+  if(e.key === 'Escape') {
+    closeGoto();
+    closeSearch();
+    closeAllMenus();
+    document.getElementById('modal-overlay').style.display = 'none';
+    return;
+  }
+  // Tab → switch disasm <-> decompile (when not in input)
+  if(e.key === 'Tab' && !isInputFocused()) {
+    e.preventDefault();
+    switchView(currentView === 'disasm' ? 'decompile' : 'disasm');
+    return;
+  }
+  // Number keys 1-5 → switch views (when not in input)
+  if(!isInputFocused() && ['1','2','3','4','5'].includes(e.key)) {
+    const views = ['disasm','decompile','cfg','storage','strings'];
+    switchView(views[parseInt(e.key) - 1]);
+    return;
+  }
+  // Enter in search → next match
+  if(e.key === 'Enter' && document.activeElement?.id === 'search-input') {
+    e.shiftKey ? searchPrev() : searchNext();
+    return;
+  }
+  // Enter in goto → jump
+  if(e.key === 'Enter' && document.activeElement?.id === 'goto-input') {
+    gotoOffset(document.getElementById('goto-input').value);
+    return;
+  }
+});
+ 
+// Search input handler
+document.getElementById('search-input')?.addEventListener('input', (e) => {
+  performSearch(e.target.value);
+});
+ 
+// Goto modal click-outside-to-close
+document.getElementById('goto-modal')?.addEventListener('click', (e) => {
+  if(e.target.id === 'goto-modal') closeGoto();
+});
+ 
+function isInputFocused() {
+  const tag = document.activeElement?.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA';
+}
+ 
+// ===========================
+// MENU SYSTEM
+// ===========================
+function toggleMenu(el) {
+  const wasOpen = el.classList.contains('open');
+  closeAllMenus();
+  if(!wasOpen) el.classList.add('open');
+}
+
+function closeAllMenus() {
+  document.querySelectorAll('.menu-item').forEach(m => m.classList.remove('open'));
+}
+
+document.addEventListener('click', (e) => {
+  if(!e.target.closest('.menu-item')) closeAllMenus();
+});
+ 
+// ===========================
+// EXPORT FUNCTIONS
+// ===========================
+function exportDisasm() {
+  closeAllMenus();
+  if(!currentInstructions.length) { log('warn', 'No data to export. Load a contract first.'); return; }
+  let txt = `; rEVMe Disassembly Export\n; ${new Date().toISOString()}\n; ${currentInstructions.length} instructions\n\n`;
+  for(const ins of currentInstructions) {
+    const offset = ins.offset.toString(16).padStart(4,'0');
+    const op = (ins.opcode || '').padEnd(16);
+    const operand = ins.operand || '';
+    const comment = ins.comment ? `  ; ${ins.comment}` : '';
+    txt += `${offset}  ${op}${operand}${comment}\n`;
+  }
+  downloadFile('disassembly.txt', txt, 'text/plain');
+  log('ok', 'Disassembly exported as disassembly.txt');
+}
+
+function exportDecompiled() {
+  closeAllMenus();
+  if(!currentInstructions.length) { log('warn', 'No data to export. Load a contract first.'); return; }
+  const html = decompile(currentInstructions, currentFunctions);
+  // Strip HTML tags to get plain Solidity
+  const sol = html.replace(/<[^>]+>/g, '').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+  downloadFile('decompiled.sol', sol, 'text/plain');
+  log('ok', 'Decompiled code exported as decompiled.sol');
+}
+
+function exportReport() {
+  closeAllMenus();
+  if(!currentInstructions.length) { log('warn', 'No data to export. Load a contract first.'); return; }
+  const vulns = scanVulnerabilities(currentInstructions);
+  const report = {
+    tool: 'rEVMe v1.0',
+    timestamp: new Date().toISOString(),
+    contract: document.getElementById('info-address')?.textContent || '<bytecode>',
+    stats: {
+      bytecodeSize: document.getElementById('info-size')?.textContent || '—',
+      instructions: currentInstructions.length,
+      functions: currentFunctions.length,
+      standards: document.getElementById('info-erc')?.textContent || '—',
+      compiler: document.getElementById('info-compiler')?.textContent || '—'
+    },
+    functions: currentFunctions.map(f => ({
+      selector: f.selector,
+      name: f.name,
+      offset: f.offset,
+      isView: f.isView,
+      isPayable: f.isPayable,
+      isVuln: f.isVuln
+    })),
+    vulnerabilities: vulns.map(v => ({
+      name: v.name,
+      severity: v.severity,
+      offset: v.offset,
+      description: v.description
+    })),
+    storageLayout: buildStorageLayout(currentInstructions)
+  };
+  downloadFile('report.json', JSON.stringify(report, null, 2), 'application/json');
+  log('ok', 'Security report exported as report.json');
+}
+
+function downloadFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+ 
+// ===========================
+// TAINT TRACKING & QUERIES
+// ===========================
+const TaintEngine = {
+  // Check if data from source instruction flows to sink instruction
+  flowsTo: function(sourceOffset, sinkOffset, instructions) {
+    let startIndex = instructions.findIndex(i => i.offset === sourceOffset);
+    let endIndex = instructions.findIndex(i => i.offset === sinkOffset);
+    if (startIndex === -1 || endIndex === -1 || startIndex >= endIndex) return false;
+    
+    // Naive reachability: if there isn't a guaranteed path break (Unconditional jump/return) and they are within reasonable distance
+    for (let i = startIndex; i < endIndex; i++) {
+        const op = instructions[i].opcode;
+        if (op === 'RETURN' || op === 'REVERT' || op === 'STOP' || op === 'INVALID') {
+            return false;
+        }
+    }
+    return true;
+  }
+};
+
+function runCustomQuery() {
+  const code = document.getElementById('query-editor').value;
+  const resultsContainer = document.getElementById('query-results');
+  resultsContainer.innerHTML = '';
+  
+  if (!code || !code.trim()) {
+    resultsContainer.innerHTML = '<div style="color:var(--text3);font-size:10px;text-align:center;margin-top:40px;">Please enter a query script.</div>';
+    return;
+  }
+  
+  try {
+    const sandbox = new Function('instructions', 'functions', 'log', 'TaintEngine', code);
+    const results = sandbox(currentInstructions, currentFunctions, (m) => log('info', m), TaintEngine);
+    
+    if (!results || !Array.isArray(results) || results.length === 0) {
+      resultsContainer.innerHTML = '<div style="color:var(--text3);font-size:10px;text-align:center;margin-top:40px;">Query completed: 0 results found.</div>';
+      return;
+    }
+    
+    let html = '';
+    for(const res of results) {
+       const offStr = res.offset !== undefined ? res.offset : (res.source || 0);
+       const offHex = '0x' + offStr.toString(16).padStart(4,'0');
+       html += `<div class="query-result-row" onclick="window.switchView('disasm'); setTimeout(() => hexRowClick(${offStr}), 50)">
+         <span class="qr-offset">${offHex}</span>
+         <span class="qr-msg">${res.msg || 'Match found'}</span>
+       </div>`;
+    }
+    resultsContainer.innerHTML = html;
+    log('ok', `Query Engine found ${results.length} matches.`);
+    
+  } catch(e) {
+    log('err', `Query Engine Error: ${e.message}`);
+    resultsContainer.innerHTML = `<div style="color:var(--danger);font-size:11px;padding:12px;">Erreur d'exécution :<br><br>${e.message}</div>`;
+  }
+}
+
+// ===========================
+// UI HELPERS
+// ===========================
+function switchView(view) {
+  currentView = view;
+  ['disasm','decompile','cfg','storage','strings','queries'].forEach(v => {
+    const el = document.getElementById(`view-${v}`);
+    if(el) el.style.display = 'none';
+    const tab = document.getElementById(`tab-${v}`);
+    if(tab) tab.classList.remove('active');
+  });
+  const elTarget = document.getElementById(`view-${view}`);
+  if(elTarget) {
+    if(view === 'cfg' || view === 'queries') elTarget.style.display = 'flex';
+    else elTarget.style.display = 'block';
+  }
+  if(view==='disasm') document.getElementById(`view-${view}`).style.display='';
+  const tabTarget = document.getElementById(`tab-${view}`);
+  if(tabTarget) tabTarget.classList.add('active');
+ 
+  document.querySelectorAll('.tool-btn').forEach(b=>b.classList.remove('active'));
+  if(view==='disasm') document.querySelectorAll('.tool-btn')[0]?.classList.add('active');
+  if(view==='decompile') document.querySelectorAll('.tool-btn')[1]?.classList.add('active');
+  if(view==='cfg') document.querySelectorAll('.tool-btn')[2]?.classList.add('active');
+ 
+  if(view==='cfg' && currentInstructions.length) {
+    setTimeout(()=>renderCFG(currentInstructions, currentFunctions), 50);
+  }
+}
+ 
+function selectFunction(el, selector) {
+  document.querySelectorAll('.fn-item').forEach(e=>e.classList.remove('selected'));
+  el.classList.add('selected');
+  switchView('disasm');
+
+  // Scroll disassembly to the function's offset
+  const fn = currentFunctions.find(f => f.selector.replace(/'/g,'') === selector);
+  if(fn && fn.offset >= 0) {
+    const targetHex = fn.offset.toString(16).padStart(4,'0');
+    const rows = document.querySelectorAll('.disasm-row');
+    for(const row of rows) {
+      const off = row.querySelector('.d-offset')?.textContent?.trim();
+      if(off === targetHex) {
+        document.querySelectorAll('.disasm-row').forEach(r => r.classList.remove('selected'));
+        row.classList.add('selected');
+        row.classList.add('flash');
+        row.scrollIntoView({ behavior:'smooth', block:'center' });
+        document.getElementById('status-offset').textContent = '0x' + targetHex;
+        break;
+      }
+    }
+  }
+}
+ 
+function cycleNetwork() {
+  netIdx = (netIdx+1)%networkNames.length;
+  const net = networkNames[netIdx];
+  document.getElementById('network-btn').textContent = `⊕ ${net}`;
+  document.getElementById('network-badge').textContent = net.toUpperCase();
+  log('info', `Network switched to: ${net} (${NETWORKS[net].rpc})`);
+}
+ 
+let logCount = 0;
+function log(type, msg) {
+  const console = document.getElementById('console');
+  const now = new Date();
+  const time = [now.getHours(),now.getMinutes(),now.getSeconds()].map(n=>n.toString().padStart(2,'0')).join(':');
+  const div = document.createElement('div');
+  div.className = `log-${type}`;
+  div.innerHTML = `<span class="log-time">[${time}]</span>${msg}`;
+  console.appendChild(div);
+  console.scrollTop = console.scrollHeight;
+}
+ 
+// ===========================
+// SAMPLE BYTECODE (ERC-20)
+// ===========================
+const SAMPLE_BYTECODE = '0x608060405234801561001057600080fd5b50600436106100cf5760003560e01c806306fdde03146100d4578063095ea7b3146100f257806318160ddd1461012257806323b872dd1461014057806340c10f191461017057806342966c681461018c578063313ce567146101a857806370a08231146101c657806395d89b41146101f657806340c10f19146102145780638da5cb5b14610244578063a9059cbb14610262578063dd62ed3e14610292578063f2fde38b146102c2575b600080fd5b6100dc6102de565b005b6100fa6004803603810190610107959392919061082056150b565b610370565b005b61012a610388565b005b610148610393565b005b610178610003803603810190610107333333333345678902345678ab5b565b005b610194610003803603810190610107333366778899aabbccddeeff9a78564d569b565b005b6101b0610395565b005b6101ce60048036038101906101c99190610820565b6103a2565b005b6101fe60048036038101906101f99190610820565b6103ae565b005b6102066103bd565b005b61021c6103c5565b005b61024c6103cd565b005b61026a600480360381019061026595929491908190610846565b6103d9565b005b61029a60048036038101906102959190610873565b6103f2565b005b6102ca600480360381019061026595929491908190610846565b61040d565b005b6102dc60048036038101906102d99190610820565b610422565b005b';
+ 
+function loadSample() {
+  document.getElementById('address-input').value = SAMPLE_BYTECODE;
+  analyzeContract();
+}
+ 
+// Expose to window for inline React onClick handlers
+window.analyzeContract = analyzeContract;
+window.switchView = switchView;
+window.toggleMenu = toggleMenu;
+window.openApiKeyModal = openApiKeyModal;
+window.closeApiKeyModal = closeApiKeyModal;
+window.saveApiKey = saveApiKey;
+window.openSearch = openSearch;
+window.closeSearch = closeSearch;
+window.openGoto = openGoto;
+window.cfgZoom = cfgZoom;
+window.cfgReset = cfgReset;
+window.toggleCfgSettings = toggleCfgSettings;
+window.cfgSettingChanged = cfgSettingChanged;
+window.exportDisasm = exportDisasm;
+window.exportDecompiled = exportDecompiled;
+window.exportReport = exportReport;
+window.loadSample = loadSample;
+window.hexRowClick = hexRowClick;
+window.runCustomQuery = runCustomQuery;
+window.cycleNetwork = cycleNetwork;
+window.loadABI = loadABI;
+
+window.__initLegacy = () => {
+  log('info', 'EVM decoder ready. Supports Solidity 0.4.x–0.8.x bytecode.');
+  log('info', 'RPC: <span style="color:var(--accent)">LlamaRPC (public)</span> · 4byte.directory resolver active');
+  if(etherscanApiKey) {
+    log('ok', `Etherscan API key loaded (${etherscanApiKey.slice(0,6)}…).`);
+  } else {
+    log('warn', 'No Etherscan API key set. Click <span style="color:var(--accent);cursor:pointer;" onclick="openApiKeyModal()">⚿ API Key</span> to enable verified ABI fetch.');
+  }
+  log('info', 'Sample: <span style="color:var(--accent);cursor:pointer;" onclick="loadSample()">▶ Load ERC-20 bytecode</span> · Or paste any contract address (0x…)');
+};
